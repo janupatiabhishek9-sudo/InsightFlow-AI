@@ -18,24 +18,29 @@ def generate_report(state: InvestigationState, deps: Dependencies) -> dict:
     evidence = list(state.get("retrieved_context") or []) + list(state.get("evidence") or [])
     extra = list(state.get("extra_limitations") or [])
 
-    def rule_based():
-        return draft_claims_rule_based(u, plan, state.get("step_results") or {}, evidence,
-                                       state["data_quality_report"], state["validation_results"], extra)
-
-    draft, update = with_fallback(
+    # The deterministic draft is always the backbone: every computed fact, contributor and driver.
+    base = draft_claims_rule_based(u, plan, state.get("step_results") or {}, evidence,
+                                   state["data_quality_report"], state["validation_results"], extra)
+    llm_draft, update = with_fallback(
         state, deps, "report_generator", REPORT_GENERATOR_V1.id,
-        lambda llm: report_with_llm(llm, u, plan.objective, evidence, rule_based().limitations),
-        rule_based,
+        lambda llm: report_with_llm(llm, u, plan.objective, evidence, base.limitations),
+        lambda: None,
     )
-    guarded = guard_claims(draft.claims, evidence)
-    # The executive finding must itself be a verified fact; otherwise fall back to the deterministic one.
+    claims, next_analyses, limitations = list(base.claims), list(base.next_analyses), list(base.limitations)
+    if llm_draft is not None:
+        # The LLM adds interpretation on top of the verified facts; it never replaces them.
+        claims += [c for c in llm_draft.claims if c.kind in ("interpretation", "hypothesis")]
+        next_analyses = list(dict.fromkeys(llm_draft.next_analyses + next_analyses))[:6]
+        limitations += [l for l in llm_draft.limitations if l not in limitations]
+    guarded = guard_claims(claims, evidence)
+    # The executive finding must itself be a verified fact.
     exec_facts = [c for c in guarded.claims if c.section == "executive" and c.kind == "fact"]
-    executive = exec_facts[0].text if exec_facts else rule_based().executive_finding
-    limitations = list(draft.limitations) + [f"Output guard: {i}" for i in guarded.issues]
+    executive = exec_facts[0].text if exec_facts else base.executive_finding
+    limitations += [f"Output guard: {i}" for i in guarded.issues]
     report = Report(
-        title=draft.title, executive_finding=executive, claims=guarded.claims,
+        title=base.title, executive_finding=executive, claims=guarded.claims,
         business_context=citations([e for e in evidence if e.evidence_type == "rag"]),
-        limitations=list(dict.fromkeys(limitations)), next_analyses=draft.next_analyses, assumptions=u.assumptions,
+        limitations=list(dict.fromkeys(limitations)), next_analyses=next_analyses, assumptions=u.assumptions,
     )
     report.markdown = render_markdown(report, evidence)
     return {**update, "final_report": report}

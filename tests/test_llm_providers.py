@@ -57,7 +57,7 @@ def test_auto_detects_provider_from_keys(monkeypatch, env, expected):
 
 def test_build_llm_uses_provider_defaults_and_overrides():
     c = build_llm(_settings(groq_api_key="x"))
-    assert (c.provider, c.model) == ("groq", "llama-3.3-70b-versatile")
+    assert (c.provider, c.model) == ("groq", "openai/gpt-oss-120b")
     assert c._url == "https://api.groq.com/openai/v1/chat/completions"
     c = build_llm(_settings(openai_api_key="x", llm_model="gpt-4.1"))
     assert (c.provider, c.model) == ("openai", "gpt-4.1")

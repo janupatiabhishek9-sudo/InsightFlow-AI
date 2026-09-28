@@ -11,7 +11,7 @@ from app.graph.deps import Dependencies
 from app.graph.nodes.common import gateway, with_fallback
 from app.graph.state import InvestigationState
 from app.llm.client import describe
-from app.prompts.contracts import QUESTION_UNDERSTANDING_V1
+from app.prompts.contracts import QUESTION_UNDERSTANDING_V2
 from app.reasoning.catalog import build_catalog
 from app.reasoning.llm_stages import understand_with_llm
 from app.reasoning.understanding import grounded_filters, understand_rule_based
@@ -75,7 +75,7 @@ def understand_question(state: InvestigationState, deps: Dependencies) -> dict:
     def rule_based():
         return understand_rule_based(question, catalog, probe)
 
-    u, update = with_fallback(state, deps, "question_understanding", QUESTION_UNDERSTANDING_V1.id,
+    u, update = with_fallback(state, deps, "question_understanding", QUESTION_UNDERSTANDING_V2.id,
                               lambda llm: understand_with_llm(llm, question, catalog, quality), rule_based)
     if u.ambiguities:
         return {**update, "understanding": u, "status": "needs_clarification",

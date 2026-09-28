@@ -10,6 +10,8 @@ from app.llm.client import LLMError, Usage
 from app.prompts.contracts import RESULT_VALIDATOR_V1, SQL_GENERATION_V1
 from app.reasoning.execution import execute_plan
 from app.reasoning.llm_stages import repair_sql_with_llm, review_results_with_llm
+
+MAX_REVIEW_NOTES = 3  # the model lists concerns most-important first; more are mostly noise
 from app.reasoning.validation import validate_results as check_results
 
 
@@ -44,11 +46,14 @@ def validate_results(state: InvestigationState, deps: Dependencies) -> dict:
     v = check_results(plan, state["step_results"], engine, state["dataset_schema"])
     update: dict = {"validation_results": v}
     llm = active_llm(state, deps)
-    if llm is None:
+    if llm is None or not deps.settings.llm_result_review:
         return update
     # Optional semantic review. Deterministic checks stay authoritative: the model can only add warnings.
-    results = [{"step": r.step, "kind": r.kind, "status": r.status, "rows": r.rows[:5]}
-               for r in state["step_results"].values()]
+    # Samples only (token limits): the reviewer is told the full results were validated deterministically.
+    # Only computed results are reviewed (charts and documents have no rows to judge).
+    results = [{"step": r.step, "kind": r.kind, "status": r.status, "total_rows": len(r.rows),
+                "sample_rows": r.rows[:5], "summary": r.summary if r.kind == "driver_decomposition" else None}
+               for r in state["step_results"].values() if r.tool in ("execute_sql", "run_statistical_test", "run_analysis")]
     failed = [f"{c.name}: {c.detail}" for c in v.checks if not c.passed]
     versions = dict(state.get("prompt_versions") or {})
     try:
@@ -57,7 +62,7 @@ def validate_results(state: InvestigationState, deps: Dependencies) -> dict:
         versions["result_validator"] = "deterministic_only (LLM review failed)"
         return {**update, "prompt_versions": versions, "errors": [f"result_validator: {e}"]}
     extra = [ValidationCheck(name="llm_review", passed=False, severity="warning", step=c.step, detail=c.concern)
-             for c in review.concerns]
+             for c in review.concerns[:MAX_REVIEW_NOTES]]
     versions["result_validator"] = RESULT_VALIDATOR_V1.id
     return {"validation_results": v.model_copy(update={"checks": v.checks + extra}), "prompt_versions": versions,
             "token_usage": state.get("token_usage", 0) + usage.total}

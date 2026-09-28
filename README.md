@@ -86,7 +86,7 @@ python -m app.llm.check
 | Anthropic (Claude) | `ANTHROPIC_API_KEY=...` | `claude-opus-5` |
 | OpenAI | `OPENAI_API_KEY=...` | `gpt-4o-mini` |
 | Google Gemini | `GEMINI_API_KEY=...` (or `GOOGLE_API_KEY`) | `gemini-2.5-flash` |
-| Groq | `GROQ_API_KEY=...` | `llama-3.3-70b-versatile` |
+| Groq (free tier) | `GROQ_API_KEY=...` | `openai/gpt-oss-120b` |
 | Mistral | `MISTRAL_API_KEY=...` | `mistral-small-latest` |
 | DeepSeek | `DEEPSEEK_API_KEY=...` | `deepseek-chat` |
 | OpenRouter (hundreds of models) | `OPENROUTER_API_KEY=...` | `openai/gpt-4o-mini` |
@@ -104,12 +104,13 @@ How it works:
 - **The other providers** use their OpenAI-compatible endpoints with JSON-schema output. If a server doesn't support that, the client falls back to JSON mode automatically.
 - **Every reply is validated against a Pydantic schema.** One invalid reply is sent back to the model for correction. If it's still invalid, that stage falls back to the rule-based reasoner, and the trace records which one ran.
 - **A rejected key (HTTP 401/403)** switches the LLM off for the rest of the session, with one clear log message, instead of failing at every stage.
-- **Free tiers work out of the box.** Short rate-limit waits (HTTP 429 with a `retry-after` of 20 s or less) are waited out and retried. A long wait, such as a used-up daily quota, switches the session to the rule-based reasoner, so the app keeps answering.
+- **Free tiers work out of the box.** Per-minute rate limits (HTTP 429 with a `retry-after` of up to 65 s) are waited out and retried. On Groq's free tier (8,000 tokens per minute), one investigation usually pauses once for up to a minute. A long wait, such as a used-up daily quota, switches the session to the rule-based reasoner, so the app keeps answering.
 
 **Staying on a free tier (e.g. Groq):**
 - One investigation uses roughly 8–12k tokens across 3–4 LLM calls. Free tiers cap tokens per minute and per day, and the limits vary by model; see your provider's limits page (for Groq: console.groq.com/settings/limits).
-- Set `TOKEN_BUDGET=25000` in `.env` to cap how many tokens one investigation may use.
-- If you hit the daily cap often, use a smaller model with higher free limits (for example `LLM_MODEL=llama-3.1-8b-instant` on Groq). It is faster, with somewhat weaker planning; the guards and fallbacks keep the results safe either way.
+- Set `TOKEN_BUDGET=25000` in `.env` to cap how many tokens one investigation may use, and `LLM_RESULT_REVIEW=false` to skip the optional AI review (about 4k tokens and one rate-limit pause less).
+- With an LLM, the report keeps every verified fact from the deterministic engine. The model adds interpretations, hypotheses and next-analysis ideas on top, and the output guard checks them too.
+- On Groq's free tier, every chat model we tested (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`) had the same limits: 8,000 tokens per minute and 1,000 requests per day. `openai/gpt-oss-20b` answers faster, with somewhat weaker planning; the guards and fallbacks keep the results safe either way. Check the current limits at console.groq.com/settings/limits.
 - Nothing else in the project costs money. Everything runs locally, LangSmith is off by default, and CI runs on GitHub's free tier for public repositories.
 - **The LLM never has authority.** Whatever it proposes still passes grounding, plan validation, the tool gateway, the SQL/code guards and the output guard.
 
@@ -212,7 +213,7 @@ stateDiagram-v2
 Each reasoning stage (question understanding, planning, SQL repair, report writing) has:
 
 - a **rule-based** implementation. It is deterministic and runs offline. It is the default, and it is also the fallback.
-- an **LLM** implementation behind a versioned prompt contract (`question_understanding_v1`, `planner_v1`, `sql_generation_v1`, `result_validator_v1`, `report_generator_v1`).
+- an **LLM** implementation behind a versioned prompt contract (`question_understanding_v2`, `planner_v2`, `sql_generation_v1`, `result_validator_v1`, `report_generator_v1`). The v1 prompts are kept in `prompts/contracts.py` for comparison. `question_understanding_v2` stops models from asking about defaults the system already resolves (such as a quarter without a year); `planner_v2` stops them from adding narrative-writing steps. Both changes came from testing on Groq.
 
 Both produce the same Pydantic schema. Both pass through the same deterministic grounding, plan validation and output guard. If the LLM fails, returns invalid JSON twice, or exceeds the token budget, the stage falls back to rule-based. The trace records which implementation and prompt version actually ran.
 
@@ -371,6 +372,7 @@ Copy `.env.example` to `.env`. Every setting has a safe default.
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, ... | none | Provider keys (see [Connect any LLM](#connect-any-llm)) |
 | `OLLAMA_BASE_URL`, `CUSTOM_LLM_BASE_URL` | `http://localhost:11434`, none | Local / custom endpoints |
 | `TOKEN_BUDGET` | `60000` | Per investigation; after that the stages use rule-based |
+| `LLM_RESULT_REVIEW` | `true` | Optional AI review of results (up to 3 notes, labelled "not verified"); `false` saves ~4k tokens per investigation |
 | `API_KEYS`, `API_KEY` | empty | API authentication (see [Authentication](#authentication-persistence-and-deployment)) |
 | `CHECKPOINT_DB` | `data/processed/checkpoints.sqlite` | Where paused workflows are persisted (`memory` to disable) |
 | `SANDBOX_MEMORY_MB` | `1024` | Memory cap for sandboxed code |

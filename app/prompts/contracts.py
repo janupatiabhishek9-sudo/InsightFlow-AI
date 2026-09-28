@@ -66,12 +66,39 @@ QUESTION_UNDERSTANDING_V1 = PromptContract(
     safety="Only use column names and values listed in the schema context. Do not propose data changes unless the user explicitly asks.",
     evidence="Every filter value must appear verbatim in the schema context.",
 )
+# v2: v1 models flagged a missing year as ambiguous although the system resolves it by rule.
+QUESTION_UNDERSTANDING_V2 = PromptContract(
+    name="question_understanding", version="v2",
+    role="Translate an analyst's question into a structured analytical intent.",
+    task=("Extract intent, direction, metric, breakdown dimensions, filters (column -> exact values from the "
+          "schema context), period mentions exactly as written (e.g. 'Q3' or 'Q3 2024'), comparison type and "
+          "requested outputs.\n"
+          "The system resolves these by documented defaults, so they are NOT ambiguities: a quarter or month "
+          "without a year (the latest occurrence in the data is used), a missing comparison period (the previous "
+          "period is used), and a missing metric (revenue, the primary KPI). Only list an ambiguity when the "
+          "question cannot be answered without asking the user, e.g. an unknown market or an unclear 'it'."),
+    safety="Only use column names and values listed in the schema context. Do not propose data changes unless the user explicitly asks.",
+    evidence="Every filter value must appear verbatim in the schema context.",
+)
 PLANNER_V1 = PromptContract(
     name="planner", version="v1",
     role="Create an executable investigation plan. You do not execute tools.",
     task=("Produce 2-8 steps. Prefer execute_sql steps with an `analysis` spec (kinds: period_comparison, "
           "dimension_breakdown, driver_decomposition, time_trend, metric_summary); SQL is generated "
           "deterministically from it. Give every step a purpose and a rationale explaining why it is needed."),
+    safety="Use only the listed tools. Never plan data modification, file access or external communication unless the user explicitly requested it.",
+    evidence="Each step must produce evidence that a later claim can cite.",
+)
+# v2: v1 models added run_analysis steps to "write a narrative", which the report stage already does.
+PLANNER_V2 = PromptContract(
+    name="planner", version="v2",
+    role="Create an executable investigation plan. You do not execute tools.",
+    task=("Produce 2-8 steps. Prefer execute_sql steps with an `analysis` spec (kinds: period_comparison, "
+          "dimension_breakdown, driver_decomposition, time_trend, metric_summary); SQL is generated "
+          "deterministically from it. Give every step a purpose and a rationale explaining why it is needed.\n"
+          "Use run_analysis only for a computation SQL cannot express, and include its Python in `code`. Never add "
+          "steps that summarise, explain or write narrative: a later stage writes the report from the evidence. "
+          "Add one create_chart step for the most important breakdown (x=dim_value, y=abs_change)."),
     safety="Use only the listed tools. Never plan data modification, file access or external communication unless the user explicitly requested it.",
     evidence="Each step must produce evidence that a later claim can cite.",
 )
@@ -99,4 +126,4 @@ REPORT_GENERATOR_V1 = PromptContract(
     evidence="Every fact must cite at least one evidence id, and every number must come from the cited evidence. Uncited facts will be downgraded automatically.",
 )
 
-CONTRACTS = {c.name: c for c in (QUESTION_UNDERSTANDING_V1, PLANNER_V1, SQL_GENERATION_V1, RESULT_VALIDATOR_V1, REPORT_GENERATOR_V1)}
+CONTRACTS = {c.name: c for c in (QUESTION_UNDERSTANDING_V2, PLANNER_V2, SQL_GENERATION_V1, RESULT_VALIDATOR_V1, REPORT_GENERATOR_V1)}
