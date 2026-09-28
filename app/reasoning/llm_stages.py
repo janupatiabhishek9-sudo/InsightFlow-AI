@@ -8,6 +8,7 @@ the rule-based implementation on any LLMError.
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -18,15 +19,15 @@ from app.domain.plan import InvestigationPlan
 from app.domain.question import ComparisonType, Intent, QuestionUnderstanding
 from app.llm.client import LLMClient, Usage
 from app.prompts.contracts import (
-    PLANNER_V1,
-    QUESTION_UNDERSTANDING_V1,
+    PLANNER_V2,
+    QUESTION_UNDERSTANDING_V2,
     REPORT_GENERATOR_V1,
     RESULT_VALIDATOR_V1,
     SQL_GENERATION_V1,
 )
 from app.reasoning.catalog import DataCatalog
 from app.reasoning.reporting import ReportDraft
-from app.reasoning.understanding import ground
+from app.reasoning.understanding import _default_change_period, change_analysis_defaults, ground
 from app.security.input_guard import wrap_untrusted
 from app.tools.periods import parse_periods, previous_period, same_period_last_year
 from app.tools.registry import TOOLS
@@ -64,33 +65,65 @@ class LLMUnderstanding(BaseModel):
 
 
 def understand_with_llm(llm: LLMClient, question: str, catalog: DataCatalog, quality: DataQualityReport) -> tuple[QuestionUnderstanding, Usage]:
-    messages = QUESTION_UNDERSTANDING_V1.render(
+    messages = QUESTION_UNDERSTANDING_V2.render(
         output_schema=LLMUnderstanding.model_json_schema(), schema_context=schema_context(catalog, quality),
         task_input=f"Question: {question}",
     )
     draft, usage = llm.structured(messages, LLMUnderstanding)
+    # The model interprets; periods, defaults and grounding are resolved deterministically, as in the rule-based path.
     periods, notes = parse_periods(" ; ".join(draft.period_mentions), catalog.date_min, catalog.date_max) \
         if catalog.date_min else ([], [])
     period = periods[0] if periods else None
-    comparison = None
+    comparison, comparison_type = None, "none"
     if len(periods) > 1:
-        comparison = periods[1]
+        comparison, comparison_type = periods[1], "explicit"
     elif period and draft.comparison_type == "same_period_last_year":
-        comparison = same_period_last_year(period)
+        comparison, comparison_type = same_period_last_year(period), "same_period_last_year"
     elif period and draft.intent == Intent.CHANGE_ANALYSIS:
-        comparison = previous_period(period)
+        comparison, comparison_type = previous_period(period), "previous_period"
+        notes.append(f"Compared with the previous period ({comparison.label}), the default in company_kpis.md.")
+    elif draft.intent == Intent.CHANGE_ANALYSIS and catalog.date_max is not None:
+        period, comparison = _default_change_period(catalog, draft.direction, None)
+        comparison_type = "previous_period"
+        notes.append(f"No period named; using the most recent complete quarter: {period.label} vs {comparison.label}.")
+
+    metric = draft.metric
+    if metric is None and draft.intent != Intent.DATA_MODIFICATION and catalog.has_metric("revenue"):
+        metric = "revenue"
+        notes.append("No metric named; using revenue, the primary KPI (company_kpis.md).")
+    dimensions, requested = draft.dimensions, draft.requested_output
+    if draft.intent == Intent.CHANGE_ANALYSIS:
+        dimensions, requested, extra = change_analysis_defaults(question, metric, draft.filters, dimensions, requested, catalog)
+        notes += extra
+
     u = QuestionUnderstanding(
-        intent=draft.intent, direction=draft.direction, metric=draft.metric, dimensions=draft.dimensions,
-        filters=draft.filters, time_period=period, comparison_period=comparison,
-        comparison_type=draft.comparison_type if comparison else "none", requested_output=draft.requested_output,
-        ambiguities=draft.ambiguities, assumptions=notes,
+        intent=draft.intent, direction=draft.direction, metric=metric, dimensions=dimensions,
+        filters=draft.filters, time_period=period, comparison_period=comparison, comparison_type=comparison_type,
+        requested_output=requested, ambiguities=_unresolved(draft.ambiguities, period, metric), assumptions=notes,
     )
     return ground(u, catalog), usage
 
 
+# Ambiguities the system resolves by documented defaults (a missing year, comparison or metric).
+_RESOLVED_BY_PERIOD = re.compile(r"\b(year|quarter|q[1-4]|period|date|month|comparison|compare|timeframe|time frame)\b", re.I)
+_RESOLVED_BY_METRIC = re.compile(r"\b(metric|kpi|measure)\b", re.I)
+
+
+def _unresolved(ambiguities: list[str], period, metric: str | None) -> list[str]:
+    """Drop model-reported ambiguities that deterministic defaults have already resolved."""
+    keep = []
+    for a in ambiguities:
+        if period is not None and _RESOLVED_BY_PERIOD.search(a):
+            continue
+        if metric is not None and _RESOLVED_BY_METRIC.search(a):
+            continue
+        keep.append(a)
+    return keep
+
+
 def plan_with_llm(llm: LLMClient, u: QuestionUnderstanding, catalog: DataCatalog, quality: DataQualityReport,
                   rag_text: str) -> tuple[InvestigationPlan, Usage]:
-    messages = PLANNER_V1.render(
+    messages = PLANNER_V2.render(
         output_schema=InvestigationPlan.model_json_schema(), tools=tools_context(),
         schema_context=schema_context(catalog, quality), rag_context=rag_text,
         state=f"Structured question: {u.model_dump_json()}",
@@ -107,7 +140,26 @@ def plan_with_llm(llm: LLMClient, u: QuestionUnderstanding, catalog: DataCatalog
                 "comparison_period": a.comparison_period or (u.comparison_period if a.kind != "time_trend" else None),
             })
         steps.append(s.model_copy(update={"analysis": a}))
+    by_number = {s.step: s for s in steps}
+    steps = [_fix_chart_columns(s, by_number) for s in steps]
     return plan.model_copy(update={"steps": steps}), usage
+
+
+def _fix_chart_columns(step, by_number: dict):
+    """Chart axes must be the columns the SQL builder produces, whatever the model wrote."""
+    if step.tool != "create_chart":
+        return step
+    source = by_number.get(step.arguments.get("source_step"))
+    a = source.analysis if source else None
+    if a is None:
+        return step
+    if a.kind == "dimension_breakdown":
+        axes = {"x": "dim_value", "y": "abs_change" if a.comparison_period else "value", "chart_type": "bar"}
+    elif a.kind == "time_trend":
+        axes = {"x": "month", "y": "value", "chart_type": "line"}
+    else:
+        return step
+    return step.model_copy(update={"arguments": {**step.arguments, **axes}})
 
 
 class SQLOut(BaseModel):
@@ -143,7 +195,10 @@ def review_results_with_llm(llm: LLMClient, u: QuestionUnderstanding, plan: Inve
         output_schema=LLMResultReview.model_json_schema(),
         state=f"Question: {u.model_dump_json(include={'intent', 'metric', 'filters'})}\n"
               f"Plan: {[s.purpose for s in plan.steps]}\nDeterministic checks that failed: {failed_checks}",
-        task_input="Results (first rows per step):\n" + json.dumps(results, default=str)[:6000],
+        task_input=("Each step shows total_rows and only a sample of its rows; the complete results were already "
+                    "checked by deterministic validation. Do not report the sampling itself as a concern. "
+                    "List at most 3 concerns, most important first.\n"
+                    + json.dumps(results, default=str)[:6000]),
     )
     return llm.structured(messages, LLMResultReview)
 

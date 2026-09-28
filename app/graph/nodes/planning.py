@@ -5,7 +5,7 @@ from __future__ import annotations
 from app.graph.deps import Dependencies
 from app.graph.nodes.common import with_fallback
 from app.graph.state import InvestigationState
-from app.prompts.contracts import PLANNER_V1
+from app.prompts.contracts import PLANNER_V2
 from app.reasoning.llm_stages import plan_with_llm
 from app.reasoning.planner import plan_rule_based, revise_plan as repair_plan, validate_plan as check_plan
 from app.security.input_guard import wrap_untrusted
@@ -18,7 +18,7 @@ def create_plan(state: InvestigationState, deps: Dependencies) -> dict:
     u = state["understanding"]
     rag_text = "\n".join(wrap_untrusted(e.source, f"{e.description}: {e.result}") for e in state.get("retrieved_context", []))
     plan, update = with_fallback(
-        state, deps, "planner", PLANNER_V1.id,
+        state, deps, "planner", PLANNER_V2.id,
         lambda llm: plan_with_llm(llm, u, state["catalog"], state["data_quality_report"], rag_text),
         lambda: plan_rule_based(u, deps.settings.max_plan_steps),
     )

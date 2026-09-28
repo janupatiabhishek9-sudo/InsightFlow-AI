@@ -123,9 +123,17 @@ class FakeLLM:
             return LLMResultReview(concerns=[{"step": 2, "concern": "Q3 has fewer selling days than Q2"}]), Usage()
         if schema is LLMReport:
             ev = "E" + next(line for line in messages[1]["content"].split('"id": "E')[1:2])[0]
-            claims = [{"text": "Revenue fell by 99.9%.", "kind": "fact", "section": "executive", "evidence_ids": [ev]}] \
-                if self.fabricate else []
-            return LLMReport(executive_finding="x", claims=claims), Usage(completion_tokens=5)
+            claims = [
+                # LLM "facts" are never used: facts come only from the deterministic draft.
+                {"text": "Revenue fell by 88.8%.", "kind": "fact", "section": "executive", "evidence_ids": [ev]},
+                # An interpretation with a made-up number must be downgraded by the output guard.
+                {"text": "The decline of 99.9% is concentrated in Germany.", "kind": "interpretation",
+                 "section": "interpretation", "evidence_ids": [ev]},
+                {"text": "A competitor launch may explain part of the drop.", "kind": "hypothesis",
+                 "section": "hypothesis", "evidence_ids": [ev]},
+            ] if self.fabricate else []
+            return LLMReport(executive_finding="x", claims=claims, next_analyses=["Check competitor pricing."]), \
+                Usage(completion_tokens=5)
         raise LLMError(f"no script for {name}")  # the planner falls back to rule-based
 
 
@@ -138,7 +146,7 @@ def test_llm_path_with_fallback_is_recorded(settings):
     svc = _svc(settings, llm)
     v = svc.start_investigation(svc.example_dataset().dataset_id, "Why did European revenue decrease in Q3?")
     assert v.status == "completed"
-    assert v.prompt_versions["question_understanding"] == "question_understanding_v1"
+    assert v.prompt_versions["question_understanding"] == "question_understanding_v2"
     assert v.prompt_versions["planner"].startswith("rule_based_v1 (fallback")
     assert v.model == {"provider": "fake", "model": "scripted-1"} and v.token_usage > 0
     # The LLM result review may only add warnings; deterministic validation still passes.
@@ -147,12 +155,20 @@ def test_llm_path_with_fallback_is_recorded(settings):
     assert review and review[0].severity == "warning" and v.validation.passed
 
 
-def test_fabricated_llm_numbers_are_caught_by_the_output_guard(settings):
+def test_llm_report_adds_to_verified_facts_and_is_guarded(settings):
     svc = _svc(settings, FakeLLM(fabricate=True))
     v = svc.start_investigation(svc.example_dataset().dataset_id, "Why did European revenue decrease in Q3?")
-    fabricated = next(c for c in v.report.claims if "99.9%" in c.text)
+    claims = v.report.claims
+    # The verified deterministic backbone is always present.
+    assert any(c.section == "contributors" and "Germany" in c.text for c in claims)
+    assert any(c.section == "detail" and "Orders went from" in c.text for c in claims)
+    # LLM facts are dropped; a made-up number in an interpretation is downgraded.
+    assert not any("88.8%" in c.text for c in claims)
+    fabricated = next(c for c in claims if "99.9%" in c.text)
     assert fabricated.kind == "hypothesis" and fabricated.note
-    assert "99.9%" not in v.report.executive_finding  # executive falls back to a verified fact
+    assert any("competitor launch" in c.text and c.kind == "hypothesis" for c in claims)
+    assert v.report.next_analyses[0] == "Check competitor pricing."
+    assert "99.9%" not in v.report.executive_finding and "88.8%" not in v.report.executive_finding
     assert v.evaluation.metrics["unsupported_claim_rate"] > 0
 
 

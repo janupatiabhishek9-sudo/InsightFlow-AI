@@ -1,8 +1,8 @@
 """Output guardrail: verify claims against evidence before anything reaches the report.
 
-- A FACT must cite existing evidence; otherwise it is downgraded to HYPOTHESIS.
-- Every number in a FACT must match a value in its cited computed evidence (within display rounding);
-  otherwise it is downgraded, because the number was not produced by a deterministic tool.
+- A FACT or INTERPRETATION must cite existing evidence; otherwise it is downgraded to HYPOTHESIS.
+- Every number in a FACT or INTERPRETATION must match a value in its cited evidence (within display
+  rounding); otherwise it is downgraded, because the number was not produced by a deterministic tool.
 - Business-context statements must cite retrieved documents; otherwise they are removed
   (a hallucinated definition is worse than none).
 """
@@ -72,13 +72,14 @@ def guard_claims(claims: list[Claim], evidence: list[Evidence]) -> GuardedClaims
                 continue
             out.append(c)
             continue
-        if c.kind != "fact":
+        if c.kind == "hypothesis":  # already labelled as unconfirmed
             out.append(c)
             continue
+        # Facts and interpretations must both rest on evidence and use only real numbers.
         if not cited:
             c.kind, c.note = "hypothesis", "Downgraded: no supporting evidence was cited."
             downgraded += 1
-            issues.append(f"fact without evidence downgraded: {c.text[:80]}")
+            issues.append(f"{claim.kind} without evidence downgraded: {c.text[:80]}")
             out.append(c)
             continue
         # A number is supported only if it was computed, or appears literally in a cited document.

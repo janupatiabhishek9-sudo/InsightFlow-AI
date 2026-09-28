@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     llm_model: str = Field("", description="Empty = the provider's default model")
     llm_timeout_seconds: float = 60
     token_budget: int = 60_000
+    # Optional AI review of computed results (adds unverified notes; ~4k tokens per investigation).
+    llm_result_review: bool = True
     openai_api_key: SecretStr | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     anthropic_api_key: SecretStr | None = None

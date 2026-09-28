@@ -217,19 +217,8 @@ def understand_rule_based(question: str, catalog: DataCatalog, probe: ChangeProb
         assumptions.append("No period named; using all available data.")
 
     if intent == Intent.CHANGE_ANALYSIS:
-        requested.insert(0, "explanation")
-        # Geographic drill-down one level below the filter; none when a single country is already selected.
-        geo = None if "country" in filters else "country" if "region" in filters else "region"
-        if not dimensions:
-            dimensions = [d for d in (geo, "product") if d and catalog.has_dimension(d)]
-            assumptions.append(f"No breakdown requested; analysing contributions by {' and '.join(dimensions)}.")
-        elif re.search(r"\bwhy\b", q) and geo and geo not in dimensions and catalog.has_dimension(geo):
-            # "Why" questions need to know *where* the change happened, not only what was asked for.
-            dimensions.insert(0, geo)
-        if metric == "revenue" and "drivers" not in requested:
-            requested.append("drivers")
-        if re.search(NEXT_WORDS, q):
-            requested.append("next_analyses")
+        dimensions, requested, notes = change_analysis_defaults(q, metric, filters, dimensions, requested, catalog)
+        assumptions += notes
     requested += [f"contributing_{d}" for d in dimensions]
     if intent == Intent.RANKING and re.search(r"\b(lowest|worst|least|smallest|bottom)\b", q):
         requested.append("lowest")
@@ -246,6 +235,31 @@ def understand_rule_based(question: str, catalog: DataCatalog, probe: ChangeProb
         requested_output=list(dict.fromkeys(requested)), ambiguities=ambiguities, assumptions=assumptions,
         required_context=required_context,
     )
+
+
+def change_analysis_defaults(
+    question: str, metric: str | None, filters: dict[str, list[str]], dimensions: list[str],
+    requested: list[str], catalog: DataCatalog,
+) -> tuple[list[str], list[str], list[str]]:
+    """Standard breakdowns and outputs for a change question. Shared by the rule-based and LLM paths.
+
+    Returns (dimensions, requested_output, assumptions).
+    """
+    q = question.lower()
+    dims, req, notes = list(dimensions), ["explanation", *[r for r in requested if r != "explanation"]], []
+    # Geographic drill-down one level below the filter; none when a single country is already selected.
+    geo = None if "country" in filters else "country" if "region" in filters else "region"
+    if not dims:
+        dims = [d for d in (geo, "product") if d and catalog.has_dimension(d)]
+        notes.append(f"No breakdown requested; analysing contributions by {' and '.join(dims)}.")
+    elif re.search(r"\bwhy\b", q) and geo and geo not in dims and catalog.has_dimension(geo):
+        # "Why" questions need to know *where* the change happened, not only what was asked for.
+        dims.insert(0, geo)
+    if metric == "revenue" and "drivers" not in req:
+        req.append("drivers")
+    if re.search(NEXT_WORDS, q) and "next_analyses" not in req:
+        req.append("next_analyses")
+    return dims, req, notes
 
 
 def _default_change_period(catalog: DataCatalog, direction: str, probe: ChangeProbe | None) -> tuple[Period, Period]:

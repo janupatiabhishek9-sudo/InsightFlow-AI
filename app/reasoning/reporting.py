@@ -208,7 +208,8 @@ def draft_claims_rule_based(
 def _limitations(quality: DataQualityReport, validation: ResultValidation, extra: list[str],
                  results: dict[int, StepResult]) -> list[str]:
     out = [f"Data quality: {w}." for w in quality.warnings[:6]]
-    out += [f"Validation: {c.name} - {c.detail}" for c in validation.checks if not c.passed]
+    out += [f"Validation: {c.name} - {c.detail}" for c in validation.checks if not c.passed and c.name != "llm_review"]
+    out += [f"AI reviewer note (not verified): {c.detail}" for c in validation.checks if c.name == "llm_review"]
     out += [f"Step {r.step} ({r.tool}) did not complete: {r.error}" for r in results.values() if r.status != "ok"]
     out += extra
     out.append("Descriptive data shows where a change happened, not why; causal statements are labelled as hypotheses.")

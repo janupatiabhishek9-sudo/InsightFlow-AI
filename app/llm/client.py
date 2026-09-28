@@ -43,8 +43,9 @@ class LLMQuotaError(LLMUnavailableError):
     """Rate limit with a long wait (e.g. a free-tier daily token quota is used up)."""
 
 
-# Free tiers answer bursts with HTTP 429 + retry-after. Short waits are worth it; long ones are not.
-MAX_RATE_LIMIT_WAIT_SECONDS = 20
+# Free tiers answer bursts with HTTP 429 + retry-after. Per-minute token windows reset within a minute,
+# so those waits are worth it; longer waits (daily quotas) are not.
+MAX_RATE_LIMIT_WAIT_SECONDS = 65
 MAX_RATE_LIMIT_RETRIES = 2
 
 
@@ -76,7 +77,7 @@ class OpenAICompatible:
 OPENAI_COMPATIBLE: dict[str, OpenAICompatible] = {
     "openai": OpenAICompatible("", "openai_api_key", "gpt-4o-mini"),  # base URL from OPENAI_BASE_URL
     "gemini": OpenAICompatible("https://generativelanguage.googleapis.com/v1beta/openai", "gemini_api_key", "gemini-2.5-flash"),
-    "groq": OpenAICompatible("https://api.groq.com/openai/v1", "groq_api_key", "llama-3.3-70b-versatile"),
+    "groq": OpenAICompatible("https://api.groq.com/openai/v1", "groq_api_key", "openai/gpt-oss-120b"),
     "mistral": OpenAICompatible("https://api.mistral.ai/v1", "mistral_api_key", "mistral-small-latest"),
     "deepseek": OpenAICompatible("https://api.deepseek.com/v1", "deepseek_api_key", "deepseek-chat"),
     "openrouter": OpenAICompatible("https://openrouter.ai/api/v1", "openrouter_api_key", "openai/gpt-4o-mini"),
