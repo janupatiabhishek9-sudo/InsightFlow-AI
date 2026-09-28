@@ -49,6 +49,8 @@ class Settings(BaseSettings):
 
     # Data
     data_dir: Path = Path("data")
+    # SQLite file for workflow checkpoints (paused approvals survive restarts); "memory" = not persisted
+    checkpoint_db: str = "data/processed/checkpoints.sqlite"
     max_upload_mb: int = 100
 
     # Agent loop control
@@ -61,9 +63,11 @@ class Settings(BaseSettings):
     sandbox_timeout: float = Field(20, gt=0)
     sandbox_memory_mb: int = Field(1024, ge=128)
 
-    # UI
+    # UI / API
     ui_backend: Literal["local", "http"] = "local"
     api_url: str = "http://localhost:8000"
+    api_key: SecretStr | None = Field(None, description="Key the Streamlit UI sends when UI_BACKEND=http")
+    api_keys: SecretStr | None = Field(None, description="name:key:role:clearance,... - empty disables API auth")
 
     # Observability
     log_level: str = "INFO"

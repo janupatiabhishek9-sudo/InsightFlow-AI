@@ -19,21 +19,23 @@ Every number in the final report comes from an executed query and cites its evid
 ## Contents
 
 1. [Quick start](#quick-start)
-2. [What a run looks like](#what-a-run-looks-like)
-3. [Architecture](#architecture)
-4. [Why each technology](#why-each-technology)
-5. [Security architecture](#security-architecture)
-6. [Human-in-the-loop](#human-in-the-loop)
-7. [Evidence and reports](#evidence-and-reports)
-8. [Evaluation](#evaluation)
-9. [Observability](#observability)
-10. [Configuration](#configuration)
-11. [Running tests and evaluations](#running-tests-and-evaluations)
-12. [MCP servers](#mcp-servers)
-13. [Running on an 8 GB laptop](#running-on-an-8-gb-laptop)
-14. [Repository layout](#repository-layout)
-15. [Known limitations](#known-limitations)
-16. [Future production work](#future-production-work)
+2. [Connect any LLM](#connect-any-llm)
+3. [What a run looks like](#what-a-run-looks-like)
+4. [Architecture](#architecture)
+5. [Why each technology](#why-each-technology)
+6. [Security architecture](#security-architecture)
+7. [Human-in-the-loop](#human-in-the-loop)
+8. [Authentication, persistence and deployment](#authentication-persistence-and-deployment)
+9. [Evidence and reports](#evidence-and-reports)
+10. [Evaluation](#evaluation)
+11. [Observability](#observability)
+12. [Configuration](#configuration)
+13. [Running tests and evaluations](#running-tests-and-evaluations)
+14. [MCP servers](#mcp-servers)
+15. [Running on an 8 GB laptop](#running-on-an-8-gb-laptop)
+16. [Repository layout](#repository-layout)
+17. [Known limitations](#known-limitations)
+18. [Future production work](#future-production-work)
 
 ---
 
@@ -67,7 +69,46 @@ Open http://localhost:8501, click **Use example sales dataset**, pick an example
 uvicorn app.main:app --port 8000     # interactive docs at http://localhost:8000/docs
 ```
 
-**Use a real LLM** (optional): copy `.env.example` to `.env` and set `LLM_PROVIDER=openai` with `OPENAI_API_KEY`, or `LLM_PROVIDER=ollama` with a small local model. See [Configuration](#configuration).
+**Use a real LLM** (optional): copy `.env.example` to `.env` and paste **one** API key. See [Connect any LLM](#connect-any-llm).
+
+**Run with Docker** (optional): `docker compose up --build` starts the API on port 8000 and the UI on port 8501.
+
+---
+
+## Connect any LLM
+
+Paste a key into `.env` and it is picked up automatically (`LLM_PROVIDER=auto`). Then check it works:
+
+```bash
+python -m app.llm.check
+# LLM_PROVIDER=auto -> using: anthropic
+# anthropic/claude-opus-5: ok=True message='pong' tokens=...
+```
+
+| Provider | Put this in `.env` | Default model (override with `LLM_MODEL`) |
+|---|---|---|
+| Anthropic (Claude) | `ANTHROPIC_API_KEY=...` | `claude-opus-5` |
+| OpenAI | `OPENAI_API_KEY=...` | `gpt-4o-mini` |
+| Google Gemini | `GEMINI_API_KEY=...` (or `GOOGLE_API_KEY`) | `gemini-2.5-flash` |
+| Groq | `GROQ_API_KEY=...` | `llama-3.3-70b-versatile` |
+| Mistral | `MISTRAL_API_KEY=...` | `mistral-small-latest` |
+| DeepSeek | `DEEPSEEK_API_KEY=...` | `deepseek-chat` |
+| OpenRouter (hundreds of models) | `OPENROUTER_API_KEY=...` | `openai/gpt-4o-mini` |
+| Together AI | `TOGETHER_API_KEY=...` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
+| xAI (Grok) | `XAI_API_KEY=...` | `grok-3-mini` |
+| Ollama (local, free) | `LLM_PROVIDER=ollama` | `qwen2.5:3b` |
+| Any OpenAI-compatible server (vLLM, LM Studio, LiteLLM, Azure OpenAI v1) | `CUSTOM_LLM_BASE_URL=...`, `LLM_MODEL=...`, optional `CUSTOM_LLM_API_KEY` | n/a |
+
+- **Several keys set?** The first one wins, in the order of the table (Anthropic first). You can also force one with, for example, `LLM_PROVIDER=gemini`.
+- **No key?** The app runs offline with the deterministic rule-based reasoner.
+- **Default models** are only starting points. Model catalogues change, so set `LLM_MODEL` to any model your account offers.
+
+How it works:
+- **Claude** uses the official `anthropic` SDK with structured outputs (`messages.parse`), so replies are constrained to the stage's Pydantic schema. On `claude-opus-5`, server-side refusal fallbacks are enabled: if a safety classifier declines a request, the API retries it on a fallback model.
+- **The other providers** use their OpenAI-compatible endpoints with JSON-schema output. If a server doesn't support that, the client falls back to JSON mode automatically.
+- **Every reply is validated against a Pydantic schema.** One invalid reply is sent back to the model for correction. If it's still invalid, that stage falls back to the rule-based reasoner, and the trace records which one ran.
+- **A rejected key (HTTP 401/403)** switches the LLM off for the rest of the session, with one clear log message, instead of failing at every stage.
+- **The LLM never has authority.** Whatever it proposes still passes grounding, plan validation, the tool gateway, the SQL/code guards and the output guard.
 
 ---
 
@@ -204,12 +245,13 @@ Defense in depth. No single layer is trusted on its own.
 | **Trust boundaries** | prompts, profiler, retrieval | Dataset cells and documents are wrapped as `<untrusted_data>`; instruction-like cells are flagged; injected documents are quarantined |
 | **Grounding** | `reasoning/understanding.py` | Every metric, column, filter value and period is checked against the real data; unknowns become clarification questions, never guesses |
 | **Plan validation** | `reasoning/planner.py` | Columns, values and periods exist; tools are registered and grantable; SQL and code pass their guards; step limits are respected |
-| **Tool authorization** | `security/policies.py`, `tools/gateway.py` | Every tool declares permissions, risk, read-only status and timeout; one gateway enforces permissions, budgets, argument schemas and timeouts |
+| **Tool authorization** | `security/policies.py`, `tools/gateway.py` | Every tool declares permissions, risk, read-only status, timeout and typed input/output schemas; one gateway enforces permissions, budgets, both schemas and timeouts, and retries transient failures of read-only tools with backoff (writes are never retried) |
 | **SQL guard** | `security/sql_guard.py` | Parses SQL with `sqlglot` (not regex): one SELECT/WITH only; no DDL/DML, `ATTACH`, `COPY`, `PRAGMA`, file/network/system functions, other tables or schema-qualified names |
 | **Engine lock-down** | `tools/duckdb_engine.py` | After loading, `enable_external_access=false` and `lock_configuration=true`, so even SQL that slips past the guard can't read files; query timeout and row limits apply |
-| **Code guard + sandbox** | `security/code_guard.py`, `sandbox.py` | AST allow-list of imports and attributes → separate `python -I` process with an empty environment (no secrets), private temp dir, timeout, output cap → runtime audit hook blocking sockets, subprocesses and file access outside the sandbox |
+| **Code guard + sandbox** | `security/code_guard.py`, `sandbox.py`, `limits.py` | AST allow-list of imports and attributes → separate `python -I` process with an empty environment (no secrets), private temp dir, timeout, output cap → OS limits: memory cap and no child processes (Windows Job Object; `RLIMIT_AS`/`RLIMIT_NPROC` on Linux) → runtime audit hook blocking sockets, subprocesses and file access outside the sandbox |
 | **Output guard** | `security/output_guard.py` | Every FACT must cite evidence, and every number in it must match computed evidence or appear verbatim in a cited document; otherwise it is downgraded to HYPOTHESIS. Uncited business definitions are removed |
-| **Clearance** | `rag/retrieval.py`, `service.py` | Documents carry `access_level`; filtering happens *before* ranking; callers may lower but never raise their clearance |
+| **Clearance** | `rag/retrieval.py`, `service.py` | Documents carry `access_level`; filtering happens *before* ranking; a caller's clearance comes from their API key and may be lowered, never raised |
+| **API authentication** | `api/auth.py` | API keys mapped to a name, role and clearance; constant-time key comparison; role checks on every route |
 
 **Permissions** (`READ_DATA`, `RUN_ANALYSIS`, `READ_KNOWLEDGE`, `WRITE_FILE`, `ACCESS_EXTERNAL_SYSTEM`, `SEND_EXTERNAL_MESSAGE`, `MODIFY_DATA`) are granted by configuration. `MODIFY_DATA` can be granted for a single step, and only by a recorded human approval. Nothing the model outputs can grant a permission.
 
@@ -231,11 +273,49 @@ Risk:       HIGH
 [APPROVE]   [REJECT]
 ```
 
-The pause uses LangGraph's `interrupt()` with a checkpointer. The reviewer's decision (who, when, approve/reject, comment) is stored in state and in the trace:
+The pause uses LangGraph's `interrupt()` with a SQLite checkpointer, so a paused investigation **survives a restart**. The reviewer's decision (who, when, approve/reject, comment) is stored in state and in the trace:
 - **Approve** resumes execution with `MODIFY_DATA` granted to that step only.
 - **Reject** ends the investigation safely with nothing executed.
 
-Via the API: `POST /investigations/{id}/decision` with `{"approved": true, "reviewer": "alice"}`.
+Via the API: `POST /investigations/{id}/decision` with `{"approved": true}`. This requires the `approver` role. When authentication is on, the recorded reviewer is the authenticated caller, never a name supplied in the request.
+
+---
+
+## Authentication, persistence and deployment
+
+**API keys and roles.** Set `API_KEYS` in `.env` as `name:key:role:clearance`, comma-separated:
+
+```bash
+API_KEYS=alice:<32+ random chars>:approver:restricted,bob:<32+ random chars>:analyst:internal
+```
+
+| Role | Can |
+|---|---|
+| `viewer` | Read datasets, investigations and traces |
+| `analyst` | Also upload datasets and start investigations |
+| `approver` | Also approve or reject risky actions |
+
+- Clients send the key in an `X-API-Key` header.
+- The clearance caps which knowledge documents that caller's investigations can retrieve.
+- With `API_KEYS` empty, auth is off, which is meant for local development only.
+- `GET /me` shows who you are authenticated as.
+
+**Persistence.** Workflow checkpoints go to `CHECKPOINT_DB` (a SQLite file by default). Traces go to `data/traces/`. Uploaded datasets go to `data/raw/`.
+
+**Docker.**
+
+```bash
+docker compose up --build        # API http://localhost:8000, UI http://localhost:8501
+```
+
+- One image serves both the API and the UI.
+- It runs as a non-root user, with memory limits and a named volume for `data/`.
+- The UI talks to the API over HTTP (set `API_KEY` in `.env` if auth is on).
+
+**CI.** `.github/workflows/ci.yml` runs on every push and pull request:
+- the test suite on Ubuntu (Python 3.11 and 3.12) and Windows (Python 3.12);
+- the golden-set evaluation regression gate;
+- a Docker build plus a `/health` smoke test.
 
 ---
 
@@ -275,13 +355,14 @@ Each run also self-evaluates online (evidence coverage, unsupported-claim rate, 
 ## Observability
 
 Every investigation has an ID and writes `data/traces/<id>.json`. The trace contains:
-- the question, model and **prompt versions**, and the dataset and schema;
+- the question, provider, model version and **prompt versions** (including which stages fell back to rule-based), and the dataset and schema;
 - the retrieved documents, the plan and its validation;
-- every tool call with arguments, status, duration and error, plus all SQL;
+- every tool call with arguments, status, duration, attempts and error, plus all SQL;
+- retry counts (plan revisions, result retries, tool retries);
 - the results, validation checks, risk decision and **human decision**;
 - the final report, evaluation, token usage, errors, and per-node timing events.
 
-Traces are also written when a run pauses for approval. Logs are structured JSON. Set `ENABLE_LANGSMITH=true` with an API key to also send LangGraph traces to LangSmith.
+Traces are also written when a run pauses for approval. The UI shows the workflow progress live, node by node, while an investigation runs. Logs are structured JSON. Set `ENABLE_LANGSMITH=true` with an API key to also send LangGraph traces to LangSmith.
 
 ---
 
@@ -291,11 +372,14 @@ Copy `.env.example` to `.env`. Every setting has a safe default.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_PROVIDER` | `rule_based` | `rule_based` (offline), `openai` (any OpenAI-compatible API) or `ollama` |
-| `LLM_MODEL` | `gpt-4o-mini` | Model name for the provider |
-| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | none / OpenAI | Credentials and endpoint |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama server |
+| `LLM_PROVIDER` | `auto` | `auto` (first key found), `rule_based` (offline), or a provider name from [Connect any LLM](#connect-any-llm) |
+| `LLM_MODEL` | empty | Empty = the provider's default model |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, ... | none | Provider keys (see [Connect any LLM](#connect-any-llm)) |
+| `OLLAMA_BASE_URL`, `CUSTOM_LLM_BASE_URL` | `http://localhost:11434`, none | Local / custom endpoints |
 | `TOKEN_BUDGET` | `60000` | Per investigation; after that the stages use rule-based |
+| `API_KEYS`, `API_KEY` | empty | API authentication (see [Authentication](#authentication-persistence-and-deployment)) |
+| `CHECKPOINT_DB` | `data/processed/checkpoints.sqlite` | Where paused workflows are persisted (`memory` to disable) |
+| `SANDBOX_MEMORY_MB` | `1024` | Memory cap for sandboxed code |
 | `EMBEDDING_MODEL` | `hashing` | or `fastembed:BAAI/bge-small-en-v1.5` (`pip install -e ".[embeddings]"`) |
 | `VECTOR_DB_PATH`, `KNOWLEDGE_DIR`, `DATA_DIR` | `data/processed/vector_store`, `knowledge`, `data` | Paths |
 | `DEFAULT_USER_CLEARANCE` | `internal` | `public` / `internal` / `restricted` |
@@ -311,7 +395,7 @@ Secrets are read only from the environment, stored as `SecretStr`, never logged,
 ## Running tests and evaluations
 
 ```bash
-pytest                                   # 95 tests: unit, integration, security (~1 min)
+pytest                                   # 125 tests: unit, integration, security, API auth, UI (~2 min)
 pytest -m "not integration"              # fast unit tests only
 
 python -m app.evaluation.runner                                    # full golden set
@@ -321,7 +405,9 @@ python -m app.evaluation.runner --only chg-01 sec-02 hitl-01       # a subset
 
 The tests cover:
 - **Security:** `DROP` and `DELETE`, file-reading SQL functions, subprocess and network access, filesystem traversal, prompt injection in the question, the dataset and documents, secret extraction, unauthorized tool invocation, clearance escalation.
-- **The LLM code path:** tested offline with a scripted fake model, including fallback and a fabricated number being caught by the output guard.
+- **The LLM code path:** tested offline with a scripted fake model and fake HTTP transports. This covers provider auto-detection, JSON-schema to JSON-mode fallback, the correction retry, Claude's `messages.parse` path, the rejected-key circuit breaker, and a fabricated number being caught by the output guard.
+- **Production features:** a paused approval surviving a restart, API roles, reviewer identity, sandbox memory limits, tool retries, Excel upload.
+- **The UI:** the real Streamlit app is driven headlessly (investigate, then approve) with Streamlit's `AppTest`.
 
 ---
 
@@ -335,7 +421,7 @@ python -m app.mcp_servers.python_server    --dataset data/examples/sales.csv   #
 python -m app.mcp_servers.knowledge_server                                     # search_business_docs, get_kpi_definition, get_data_dictionary
 ```
 
-Each tool has a typed input schema generated from its Pydantic model, and a description that states its permissions, risk and timeout. Every call runs through the same `ToolGateway`. MCP clients get only the default grants, so `execute_write_sql` is visible but always denied over MCP.
+Each tool has typed input **and output** schemas generated from its Pydantic models (results come back as MCP structured content), and a description that states its permissions, risk and timeout. Every call runs through the same `ToolGateway`. MCP clients get only the default grants, so `execute_write_sql` is visible but always denied over MCP.
 
 Inside the app, the agent calls the gateway in-process rather than over stdio. The policies are identical, and this avoids three extra processes on an 8 GB machine. The package is named `mcp_servers` so it can never shadow the `mcp` SDK.
 
@@ -357,14 +443,14 @@ Inside the app, the agent calls the gateway in-process rather than over stdio. T
 ```text
 app/
   config.py, logging_config.py, datagen.py, service.py, main.py
-  api/            routes.py, schemas.py               REST API (FastAPI)
+  api/            routes.py, schemas.py, auth.py      REST API (FastAPI) with API-key roles
   domain/         question, plan, data, evidence, governance, report   typed Pydantic models
   graph/          graph.py, state.py, deps.py, nodes/  LangGraph workflow
   reasoning/      understanding, planner, execution, validation, reporting, llm_stages
   prompts/        contracts.py                        versioned prompt contracts
-  llm/            client.py                           OpenAI-compatible / Ollama / none
+  llm/            client.py, check.py                 Anthropic / OpenAI-compatible (Gemini, Groq, ...) / Ollama / none
   tools/          duckdb_engine, profiler, sql_builder, periods, stats_charts, registry, gateway
-  security/       policies, sql_guard, code_guard, sandbox(+runner), input_guard, output_guard
+  security/       policies, sql_guard, code_guard, sandbox(+runner), limits, input_guard, output_guard
   rag/            ingestion, embeddings, retrieval
   mcp_servers/    analytics_server, python_server, knowledge_server
   evaluation/     datasets, oracle, evaluators, runner
@@ -372,8 +458,9 @@ app/
 frontend/streamlit_app.py
 knowledge/        business/, data/, policies/           markdown with access-level metadata
 evaluations/      datasets/golden_questions.json, baseline.json
-data/             examples/sales.csv, raw/ (uploads), traces/, processed/
+data/             examples/sales.csv, raw/ (uploads), traces/, processed/ (vector store, checkpoints)
 tests/
+Dockerfile, docker-compose.yml, .github/workflows/ci.yml
 ```
 
 ---
@@ -381,22 +468,21 @@ tests/
 ## Known limitations
 
 - **The golden set was written alongside the rule-based reasoner**, so 54/54 shows it has no regressions, not how well it generalises. Questions outside the supported patterns (change, ranking, trend, summary and simple modifications) will often end in a clarification request, which is the safe outcome but not always the helpful one.
-- **The LLM mode has only been tested with a scripted fake model**, not a live OpenAI or Ollama model. Expect some prompt tuning, and run the evaluation gate before relying on it.
-- **Checkpoints are in memory**, so an investigation waiting for approval is lost if the process restarts. Evicted working copies (more than 3 active) are reloaded from the source file, dropping approved modifications.
-- **The sandbox does not enforce a memory limit on Windows.** Time, output size, environment, imports, network, process creation and file access *are* enforced.
+- **The LLM providers have been tested offline only** (fake models and fake HTTP transports), not against live APIs. Run `python -m app.llm.check` and the evaluation gate after adding a key, and expect some prompt tuning per model. Some providers may reject complex JSON schemas; the client then falls back to JSON mode, or the stage falls back to rule-based.
+- **Working copies live in memory.** Approved modifications apply to an in-memory copy of the dataset. After a restart, or when more than 3 investigations are active, the copy is reloaded from the source file. This is safe, because the source is never changed, but earlier modifications are gone.
+- **Datasets and investigations are not owned per user.** Any authenticated caller with the right role can see all of them.
+- **The Docker setup is verified by CI only.** It is not tested on this machine.
 - **Prompt-injection detection is heuristic.** The structural defenses (grounding, authorization, SQL/engine lock-down, output guard) are what actually stop damage.
 - **Hashing embeddings are lexical**, which is fine for a small curated knowledge base but weak for synonyms. Switch to `fastembed` for semantic search.
 - The dataset needs a date column for time-based questions. The driver decomposition needs `quantity`, `unit_price` and `revenue` columns.
-- There is no authentication yet. Clearance comes from configuration.
 
 ---
 
 ## Future production work
 
-- Authentication and authorization (OIDC), with clearance and permissions taken from the user's identity
-- A persistent checkpointer (SQLite/Postgres) so approvals survive restarts
-- A task queue (Celery/RQ) behind the synchronous service seam, with streaming progress
-- Container-based sandboxing with CPU and memory cgroups
+- Single sign-on (OIDC) instead of static API keys, with per-user ownership of datasets and investigations
+- Postgres checkpoints and object storage for multi-instance deployments
+- A task queue (Celery/RQ) behind the synchronous service seam, so long investigations don't hold an HTTP request
+- Container-level sandboxing (gVisor/Firecracker) on top of the current process limits
 - A warehouse connector implementing the DuckDB engine interface
-- Docker images and a CI pipeline running `pytest` plus the evaluation regression gate
 - Evaluation against live models, and a larger golden set written independently of the implementation

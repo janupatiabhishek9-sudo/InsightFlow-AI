@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  LLM_PROVIDER: rule_based  # CI never calls a paid model; the evaluation gate runs deterministically
+
+jobs:
+  test:
+    name: tests + evaluation gate (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: "3.11"}
+          - {os: ubuntu-latest, python: "3.12"}
+          - {os: windows-latest, python: "3.12"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m app.datagen
+      - run: pytest
+      - name: Golden-set evaluation (fails on regression)
+        run: python -m app.evaluation.runner --baseline evaluations/baseline.json
+
+  docker:
+    name: docker image builds and serves /health
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t insightflow .
+      - run: |
+          docker run -d --name api -p 8000:8000 -e LLM_PROVIDER=rule_based insightflow
+          for i in $(seq 1 30); do curl -fs localhost:8000/health && exit 0; sleep 2; done
+          docker logs api; exit 1

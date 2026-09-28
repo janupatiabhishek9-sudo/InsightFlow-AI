@@ -1,0 +1,23 @@
+# docker compose up --build   ->  API on http://localhost:8000, UI on http://localhost:8501
+# Put your LLM key (and optionally API_KEYS / API_KEY) in .env; both services read it.
+services:
+  api:
+    build: .
+    env_file: .env
+    ports: ["8000:8000"]
+    volumes: ["insightflow-data:/app/data"]
+    mem_limit: 2g
+
+  ui:
+    build: .
+    env_file: .env
+    environment:
+      UI_BACKEND: http
+      API_URL: http://api:8000
+    command: ["streamlit", "run", "frontend/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+    ports: ["8501:8501"]
+    depends_on: [api]
+    mem_limit: 1g
+
+volumes:
+  insightflow-data:
