@@ -7,7 +7,7 @@ from typing import Callable, TypeVar
 
 from app.graph.deps import Dependencies
 from app.graph.state import InvestigationState
-from app.llm.client import LLMClient, LLMError, Usage
+from app.llm.client import LLMAuthError, LLMClient, LLMError, Usage
 from app.tools.gateway import ToolGateway
 from app.tools.registry import ToolContext
 
@@ -24,7 +24,7 @@ def tool_context(state: InvestigationState, deps: Dependencies) -> ToolContext:
 
 def gateway(state: InvestigationState, deps: Dependencies) -> ToolGateway:
     return ToolGateway(tool_context(state, deps), max_calls=deps.settings.max_tool_calls,
-                       calls_made=sum(1 for r in state.get("tool_calls", []) if r.status in ("ok", "error", "timeout")))
+                       max_retries=deps.settings.max_retries, calls_made=sum(1 for r in state.get("tool_calls", []) if r.status in ("ok", "error", "timeout")))
 
 
 def active_llm(state: InvestigationState, deps: Dependencies) -> LLMClient | None:
@@ -50,6 +50,10 @@ def with_fallback(
             versions[stage] = contract_id
             return result, {"prompt_versions": versions, "token_usage": state.get("token_usage", 0) + usage.total}
         except (LLMError, ValueError) as e:
+            if isinstance(e, LLMAuthError):
+                # Circuit breaker: a rejected key will keep failing, so stop calling the provider this session.
+                log.error("LLM key rejected; using the rule-based reasoner until restart", extra={"error": str(e)})
+                deps.llm = None
             log.warning("llm stage failed, using deterministic fallback", extra={"stage": stage, "error": str(e)})
             versions[stage] = f"rule_based_v1 (fallback: {str(e)[:120]})"
             return fallback(), {"prompt_versions": versions, "errors": [f"{stage}: LLM failed, used rule-based fallback: {e}"]}

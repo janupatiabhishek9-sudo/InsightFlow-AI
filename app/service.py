@@ -48,7 +48,8 @@ class InsightFlowService:
                                   self.settings.resolve(self.settings.vector_db_path),
                                   get_embedder(self.settings.embedding_model))
         self.deps = Dependencies(settings=self.settings, knowledge=knowledge, engines=EngineCache(self.settings),
-                                 sandbox=Sandbox(self.settings.sandbox_dir, self.settings.sandbox_timeout), llm=llm)
+                                 sandbox=Sandbox(self.settings.sandbox_dir, self.settings.sandbox_timeout,
+                                                 self.settings.sandbox_memory_mb), llm=llm)
         self.graph = build_graph(self.deps)
         self.traces = TraceStore(self.settings.trace_dir)
         self.settings.raw_dir.mkdir(parents=True, exist_ok=True)

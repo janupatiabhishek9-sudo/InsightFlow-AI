@@ -1,5 +1,6 @@
 """The single choke point for tool execution: lookup -> budget -> authorization -> input
-validation -> guarded execution with timeout -> audit record. The model never calls a tool directly."""
+validation -> guarded execution with timeout and controlled retry -> output validation -> audit
+record. The model never calls a tool directly."""
 
 from __future__ import annotations
 
@@ -17,6 +18,11 @@ from app.tools.registry import TOOLS, ToolContext, ToolError, ToolSpec
 
 log = logging.getLogger(__name__)
 _POOL = cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="tool")
+BACKOFF_SECONDS = 0.2
+
+
+class _Transient(Exception):
+    """A failure worth retrying (timeout or unexpected error), as opposed to a deliberate ToolError."""
 
 
 class ToolGateway:
@@ -27,12 +33,14 @@ class ToolGateway:
         calls_made: int = 0,
         grants: frozenset[Permission] = DEFAULT_GRANTS,
         tools: dict[str, ToolSpec] | None = None,
+        max_retries: int = 2,
     ):
         self.context = context
         self.max_calls = max_calls
         self.calls_made = calls_made
         self.grants = grants
         self.tools = tools if tools is not None else TOOLS
+        self.max_retries = max_retries
         self.records: list[ToolCallRecord] = []
 
     def spec(self, name: str) -> ToolSpec | None:
@@ -43,14 +51,15 @@ class ToolGateway:
     ) -> tuple[ToolCallRecord, dict | None]:
         call_id = uuid.uuid4().hex[:10]
         start = time.perf_counter()
+        attempts = 0
 
         def record(status: str, error: str | None = None) -> ToolCallRecord:
             rec = ToolCallRecord(
-                call_id=call_id, tool=tool, step=step, arguments=_redact(arguments), status=status,
-                error=error, duration_ms=round((time.perf_counter() - start) * 1000, 2),
+                call_id=call_id, tool=tool, step=step, arguments=_redact(arguments), status=status, error=error,
+                duration_ms=round((time.perf_counter() - start) * 1000, 2), attempts=max(attempts, 1),
             )
             self.records.append(rec)
-            log.info("tool call", extra={"tool": tool, "status": status, "step": step, "error": error})
+            log.info("tool call", extra={"tool": tool, "status": status, "step": step, "error": error, "attempts": attempts})
             return rec
 
         spec = self.tools.get(tool)
@@ -67,17 +76,38 @@ class ToolGateway:
             return record("error", f"invalid arguments: {e.errors()[0]['msg']}"), None
 
         self.calls_made += 1
+        # Only read-only tools are retried: re-running a write could apply it twice.
+        max_attempts = 1 + (self.max_retries if spec.policy.read_only else 0)
+        last_error, last_status = "", "error"
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                raw = self._run_once(spec, args)
+            except ToolError as e:  # deliberate, explainable refusal: never retried
+                return record("error", str(e)), None
+            except _Transient as e:
+                last_error, last_status = str(e), ("timeout" if "exceeded" in str(e) else "error")
+                if attempts < max_attempts:
+                    time.sleep(BACKOFF_SECONDS * 2 ** (attempts - 1))
+                continue
+            try:
+                output = spec.output_model.model_validate(raw).model_dump(mode="json")
+            except ValidationError as e:
+                return record("error", f"tool returned output that does not match its schema: {e.errors()[0]['msg']}"), None
+            return record("ok"), output
+        return record(last_status, f"{last_error} (after {attempts} attempt(s))"), None
+
+    def _run_once(self, spec: ToolSpec, args) -> Any:
         future = _POOL.submit(spec.handler, self.context, args)
         try:
-            output = future.result(timeout=spec.policy.timeout_seconds)
-        except cf.TimeoutError:
-            return record("timeout", f"exceeded {spec.policy.timeout_seconds}s"), None
-        except ToolError as e:
-            return record("error", str(e)), None
+            return future.result(timeout=spec.policy.timeout_seconds)
+        except cf.TimeoutError as e:
+            raise _Transient(f"exceeded {spec.policy.timeout_seconds}s") from e
+        except ToolError:
+            raise
         except Exception as e:  # unexpected failure: keep the message, never crash the graph
-            log.exception("tool failure", extra={"tool": tool})
-            return record("error", f"{type(e).__name__}: {e}"), None
-        return record("ok"), output
+            log.warning("tool failure", extra={"tool": spec.name, "error": str(e)})
+            raise _Transient(f"{type(e).__name__}: {e}") from e
 
 
 def _redact(arguments: dict[str, Any]) -> dict[str, Any]:

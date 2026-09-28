@@ -18,6 +18,7 @@ class ToolCallRecord(BaseModel):
     status: Literal["ok", "denied", "error", "timeout"]
     error: str | None = None
     duration_ms: float = 0.0
+    attempts: int = 1
     evidence_id: str | None = None
 
 

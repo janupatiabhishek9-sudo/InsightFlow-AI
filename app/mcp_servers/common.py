@@ -27,18 +27,19 @@ from app.tools.registry import TOOLS, ToolContext, ToolSpec
 
 
 def _signature_fn(spec: ToolSpec, gateway: ToolGateway):
-    def call(**kwargs: Any) -> dict:
+    def call(**kwargs: Any):
         record, out = gateway.call(spec.name, kwargs)
         if out is None:  # ToolError messages are shown to the client (denials are explained, not hidden)
             raise ToolError(f"{record.status}: {record.error}")
-        return out
+        return spec.output_model.model_validate(out)
 
     params = []
     for name, field in spec.input_model.model_fields.items():
         default = inspect.Parameter.empty if field.is_required() else field.get_default(call_default_factory=True)
         params.append(inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=default, annotation=field.annotation))
-    call.__signature__ = inspect.Signature(params, return_annotation=dict)
-    call.__annotations__ = {p.name: p.annotation for p in params} | {"return": dict}
+    # Input *and* output schemas come from the Pydantic models, so MCP clients see both.
+    call.__signature__ = inspect.Signature(params, return_annotation=spec.output_model)
+    call.__annotations__ = {p.name: p.annotation for p in params} | {"return": spec.output_model}
     call.__name__ = spec.name
     return call
 
@@ -48,7 +49,7 @@ def build_server(group: str, dataset: Path, clearance: str | None = None) -> MCP
     engine = DuckDBEngine(dataset, settings.query_timeout, settings.max_result_rows)
     knowledge = KnowledgeBase(settings.resolve(settings.knowledge_dir), settings.resolve(settings.vector_db_path),
                               get_embedder(settings.embedding_model))
-    ctx = ToolContext(engine=engine, knowledge=knowledge, sandbox=Sandbox(settings.sandbox_dir, settings.sandbox_timeout),
+    ctx = ToolContext(engine=engine, knowledge=knowledge, sandbox=Sandbox(settings.sandbox_dir, settings.sandbox_timeout, settings.sandbox_memory_mb),
                       clearance=clearance or settings.default_user_clearance)
     gateway = ToolGateway(ctx, max_calls=10_000)  # per-session budget; the agent applies its own tighter budget
     server = MCPServer(name=f"insightflow-{group}", instructions=f"InsightFlow AI {group} tools. All calls are policy-checked.")

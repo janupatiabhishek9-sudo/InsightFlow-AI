@@ -13,13 +13,14 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from app.config import AccessLevel
+from app.domain.data import DataQualityReport, DatasetSchema
 from app.domain.governance import StepResult
 from app.domain.question import Period
-from app.rag.retrieval import KnowledgeBase
+from app.rag.retrieval import KnowledgeBase, SearchResult
 from app.security.policies import Permission, ToolPolicy
 from app.security.sandbox import Sandbox
 from app.security.sql_guard import SQLGuard
-from app.tools.duckdb_engine import TABLE, DuckDBEngine, quote
+from app.tools.duckdb_engine import TABLE, DuckDBEngine, QueryResult, quote
 from app.tools.profiler import profile_dataset
 from app.tools.sql_builder import filter_predicate
 from app.tools.stats_charts import build_chart, compare_distributions
@@ -44,6 +45,49 @@ class ToolContext:
     @property
     def sql_guard(self) -> SQLGuard:
         return SQLGuard({TABLE})
+
+
+# ---- typed outputs ------------------------------------------------------------------------------
+class StatisticsOutput(BaseModel):
+    n: int
+    mean: float | None = None
+    std: float | None = None
+    min: float | str | None = None
+    median: float | None = None
+    max: float | str | None = None
+
+
+class WriteOutput(BaseModel):
+    affected_rows: int
+    rows_before: int
+    rows_after: int
+
+
+class AnalysisOutput(BaseModel):
+    result: Any = Field(description="JSON-serialisable value assigned to `result` by the sandboxed code")
+
+
+class ChartOutput(BaseModel):
+    figure_json: str = Field(description="Plotly figure serialised as JSON")
+    title: str = ""
+
+
+class StatTestOutput(BaseModel):
+    test: Literal["mann_whitney", "welch_t"]
+    metric: str
+    period_a: str
+    period_b: str
+    n_a: int
+    n_b: int
+    mean_a: float
+    mean_b: float
+    statistic: float
+    p_value: float
+    significant_at_5pct: bool
+
+
+class DictionaryOutput(BaseModel):
+    columns: dict[str, str]
 
 
 # ---- typed inputs -------------------------------------------------------------------------------
@@ -183,6 +227,7 @@ class ToolSpec:
     server: Literal["analytics", "python", "knowledge"]
     description: str
     input_model: type[BaseModel]
+    output_model: type[BaseModel]
     handler: Callable[[ToolContext, Any], dict]
 
     @property
@@ -190,26 +235,36 @@ class ToolSpec:
         return self.policy.name
 
 
-def _spec(name, server, description, input_model, handler, perms, risk, read_only=True, approval=False, timeout=30):
+def _spec(name, server, description, io, handler, perms, risk, read_only=True, approval=False, timeout=30):
     policy = ToolPolicy(name=name, permissions=perms, risk_level=risk, read_only=read_only,
                         requires_approval=approval, timeout_seconds=timeout)
-    return ToolSpec(policy, server, description, input_model, handler)
+    return ToolSpec(policy, server, description, io[0], io[1], handler)
 
 
 TOOLS: dict[str, ToolSpec] = {
     s.name: s
     for s in [
-        _spec("get_schema", "analytics", "Column names, types and kinds of the dataset.", NoInput, _get_schema, [P.READ_DATA], "LOW"),
-        _spec("profile_dataset", "analytics", "Data-quality profile: missing values, duplicates, outliers, suspicious values.", NoInput, _profile, [P.READ_DATA], "LOW"),
-        _spec("execute_sql", "analytics", "Run one guarded read-only SQL query on table `dataset`.", SQLInput, _execute_sql, [P.READ_DATA], "LOW"),
-        _spec("get_statistics", "analytics", "Summary statistics for one column, optionally filtered.", StatisticsInput, _get_statistics, [P.READ_DATA], "LOW"),
+        _spec("get_schema", "analytics", "Column names, types and kinds of the dataset.",
+              (NoInput, DatasetSchema), _get_schema, [P.READ_DATA], "LOW"),
+        _spec("profile_dataset", "analytics", "Data-quality profile: missing values, duplicates, outliers, suspicious values.",
+              (NoInput, DataQualityReport), _profile, [P.READ_DATA], "LOW"),
+        _spec("execute_sql", "analytics", "Run one guarded read-only SQL query on table `dataset`.",
+              (SQLInput, QueryResult), _execute_sql, [P.READ_DATA], "LOW"),
+        _spec("get_statistics", "analytics", "Summary statistics for one column, optionally filtered.",
+              (StatisticsInput, StatisticsOutput), _get_statistics, [P.READ_DATA], "LOW"),
         _spec("execute_write_sql", "analytics", "Apply an UPDATE/DELETE to the investigation's working copy. Needs MODIFY_DATA and human approval.",
-              WriteSQLInput, _execute_write_sql, [P.MODIFY_DATA], "HIGH", read_only=False, approval=True),
-        _spec("run_analysis", "python", "Run guarded Python in an isolated sandbox over previous step results.", AnalysisInput, _run_analysis, [P.RUN_ANALYSIS], "MEDIUM", timeout=40),
-        _spec("create_chart", "python", "Build a Plotly chart from a previous step result.", ChartInput, _create_chart, [P.RUN_ANALYSIS], "LOW"),
-        _spec("run_statistical_test", "python", "Compare a metric's distribution between two periods (Mann-Whitney or Welch t).", StatTestInput, _stat_test, [P.READ_DATA, P.RUN_ANALYSIS], "LOW"),
-        _spec("search_business_docs", "knowledge", "Search business, data and policy documents the user may read.", SearchInput, _search_docs, [P.READ_KNOWLEDGE], "LOW"),
-        _spec("get_kpi_definition", "knowledge", "Retrieve the authoritative definition of a KPI.", KPIInput, _kpi, [P.READ_KNOWLEDGE], "LOW"),
-        _spec("get_data_dictionary", "knowledge", "Column descriptions from the data dictionary.", NoInput, _dictionary, [P.READ_KNOWLEDGE], "LOW"),
+              (WriteSQLInput, WriteOutput), _execute_write_sql, [P.MODIFY_DATA], "HIGH", read_only=False, approval=True),
+        _spec("run_analysis", "python", "Run guarded Python in an isolated sandbox over previous step results.",
+              (AnalysisInput, AnalysisOutput), _run_analysis, [P.RUN_ANALYSIS], "MEDIUM", timeout=40),
+        _spec("create_chart", "python", "Build a Plotly chart from a previous step result.",
+              (ChartInput, ChartOutput), _create_chart, [P.RUN_ANALYSIS], "LOW"),
+        _spec("run_statistical_test", "python", "Compare a metric's distribution between two periods (Mann-Whitney or Welch t).",
+              (StatTestInput, StatTestOutput), _stat_test, [P.READ_DATA, P.RUN_ANALYSIS], "LOW"),
+        _spec("search_business_docs", "knowledge", "Search business, data and policy documents the user may read.",
+              (SearchInput, SearchResult), _search_docs, [P.READ_KNOWLEDGE], "LOW"),
+        _spec("get_kpi_definition", "knowledge", "Retrieve the authoritative definition of a KPI.",
+              (KPIInput, SearchResult), _kpi, [P.READ_KNOWLEDGE], "LOW"),
+        _spec("get_data_dictionary", "knowledge", "Column descriptions from the data dictionary.",
+              (NoInput, DictionaryOutput), _dictionary, [P.READ_KNOWLEDGE], "LOW"),
     ]
 }
