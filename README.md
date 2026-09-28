@@ -52,26 +52,22 @@ python -m venv .venv
 # macOS / Linux:     source .venv/bin/activate
 
 pip install -e ".[dev]"
-python -m app.datagen                 # writes data/examples/sales.csv (deterministic)
 ```
 
-**Run the web app** (one process):
+**Run the app** (one command, one process, and it creates the sample dataset on first run):
 
 ```bash
-streamlit run frontend/streamlit_app.py
+python -m app.run              # web app at http://localhost:8501 (opens your browser)
+python -m app.run --api        # also the REST API at http://localhost:8000/docs
 ```
 
-Open http://localhost:8501, click **Use example sales dataset**, pick an example question, and click **Start Investigation**.
+In the browser, click **Use example sales dataset**, pick an example question, and click **Start Investigation**. Press Ctrl+C in the terminal to stop.
 
-**Run the REST API** (optional):
-
-```bash
-uvicorn app.main:app --port 8000     # interactive docs at http://localhost:8000/docs
-```
+With `--api`, the web app talks to the API instead of loading its own copy of the service, so RAM use stays about the same. You can still start the parts by hand: `streamlit run frontend/streamlit_app.py` and `uvicorn app.main:app --port 8000`.
 
 **Use a real LLM** (optional): copy `.env.example` to `.env` and paste **one** API key. See [Connect any LLM](#connect-any-llm).
 
-**Run with Docker** (optional): `docker compose up --build` starts the API on port 8000 and the UI on port 8501.
+No Docker, database server or GPU is needed. Everything runs as plain Python on an 8 GB laptop.
 
 ---
 
@@ -248,7 +244,7 @@ Defense in depth. No single layer is trusted on its own.
 | **Tool authorization** | `security/policies.py`, `tools/gateway.py` | Every tool declares permissions, risk, read-only status, timeout and typed input/output schemas; one gateway enforces permissions, budgets, both schemas and timeouts, and retries transient failures of read-only tools with backoff (writes are never retried) |
 | **SQL guard** | `security/sql_guard.py` | Parses SQL with `sqlglot` (not regex): one SELECT/WITH only; no DDL/DML, `ATTACH`, `COPY`, `PRAGMA`, file/network/system functions, other tables or schema-qualified names |
 | **Engine lock-down** | `tools/duckdb_engine.py` | After loading, `enable_external_access=false` and `lock_configuration=true`, so even SQL that slips past the guard can't read files; query timeout and row limits apply |
-| **Code guard + sandbox** | `security/code_guard.py`, `sandbox.py`, `limits.py` | AST allow-list of imports and attributes → separate `python -I` process with an empty environment (no secrets), private temp dir, timeout, output cap → OS limits: memory cap and no child processes (Windows Job Object; `RLIMIT_AS`/`RLIMIT_NPROC` on Linux) → runtime audit hook blocking sockets, subprocesses and file access outside the sandbox |
+| **Code guard + sandbox** | `security/code_guard.py`, `sandbox.py`, `limits.py` | AST allow-list of imports and attributes → separate `python -I` process with an empty environment (no secrets), private temp dir, timeout, output cap → OS limits: memory cap (Windows Job Object, which also forbids child processes; `RLIMIT_DATA` on Linux/macOS) → runtime audit hook blocking sockets, subprocesses and file access outside the sandbox |
 | **Output guard** | `security/output_guard.py` | Every FACT must cite evidence, and every number in it must match computed evidence or appear verbatim in a cited document; otherwise it is downgraded to HYPOTHESIS. Uncited business definitions are removed |
 | **Clearance** | `rag/retrieval.py`, `service.py` | Documents carry `access_level`; filtering happens *before* ranking; a caller's clearance comes from their API key and may be lowered, never raised |
 | **API authentication** | `api/auth.py` | API keys mapped to a name, role and clearance; constant-time key comparison; role checks on every route |
@@ -302,20 +298,11 @@ API_KEYS=alice:<32+ random chars>:approver:restricted,bob:<32+ random chars>:ana
 
 **Persistence.** Workflow checkpoints go to `CHECKPOINT_DB` (a SQLite file by default). Traces go to `data/traces/`. Uploaded datasets go to `data/raw/`.
 
-**Docker.**
+**Deployment.** The app is deliberately plain Python: `python -m app.run --api` on any machine with Python 3.11+. There is no Docker, on purpose, to keep it simple and light on 8 GB laptops. If auth is on, set `API_KEY` in `.env` so the web app can call the API.
 
-```bash
-docker compose up --build        # API http://localhost:8000, UI http://localhost:8501
-```
-
-- One image serves both the API and the UI.
-- It runs as a non-root user, with memory limits and a named volume for `data/`.
-- The UI talks to the API over HTTP (set `API_KEY` in `.env` if auth is on).
-
-**CI.** `.github/workflows/ci.yml` runs on every push and pull request:
+**CI.** `.github/workflows/ci.yml` runs on GitHub's servers (nothing runs on your laptop) on every push and pull request:
 - the test suite on Ubuntu (Python 3.11 and 3.12) and Windows (Python 3.12);
-- the golden-set evaluation regression gate;
-- a Docker build plus a `/health` smoke test.
+- the golden-set evaluation regression gate.
 
 ---
 
@@ -442,6 +429,7 @@ Inside the app, the agent calls the gateway in-process rather than over stdio. T
 
 ```text
 app/
+  run.py                                              one-command launcher (python -m app.run)
   config.py, logging_config.py, datagen.py, service.py, main.py
   api/            routes.py, schemas.py, auth.py      REST API (FastAPI) with API-key roles
   domain/         question, plan, data, evidence, governance, report   typed Pydantic models
@@ -460,7 +448,7 @@ knowledge/        business/, data/, policies/           markdown with access-lev
 evaluations/      datasets/golden_questions.json, baseline.json
 data/             examples/sales.csv, raw/ (uploads), traces/, processed/ (vector store, checkpoints)
 tests/
-Dockerfile, docker-compose.yml, .github/workflows/ci.yml
+.github/workflows/ci.yml                                automatic tests on GitHub
 ```
 
 ---
@@ -471,7 +459,6 @@ Dockerfile, docker-compose.yml, .github/workflows/ci.yml
 - **The LLM providers have been tested offline only** (fake models and fake HTTP transports), not against live APIs. Run `python -m app.llm.check` and the evaluation gate after adding a key, and expect some prompt tuning per model. Some providers may reject complex JSON schemas; the client then falls back to JSON mode, or the stage falls back to rule-based.
 - **Working copies live in memory.** Approved modifications apply to an in-memory copy of the dataset. After a restart, or when more than 3 investigations are active, the copy is reloaded from the source file. This is safe, because the source is never changed, but earlier modifications are gone.
 - **Datasets and investigations are not owned per user.** Any authenticated caller with the right role can see all of them.
-- **The Docker setup is verified by CI only.** It is not tested on this machine.
 - **Prompt-injection detection is heuristic.** The structural defenses (grounding, authorization, SQL/engine lock-down, output guard) are what actually stop damage.
 - **Hashing embeddings are lexical**, which is fine for a small curated knowledge base but weak for synonyms. Switch to `fastembed` for semantic search.
 - The dataset needs a date column for time-based questions. The driver decomposition needs `quantity`, `unit_price` and `revenue` columns.

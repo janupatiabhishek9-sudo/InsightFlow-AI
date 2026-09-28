@@ -1,8 +1,8 @@
 """OS-level resource limits for the sandbox process.
 
 Windows: a Job Object caps committed memory, allows exactly one process (no children) and kills the
-process when the job handle closes. Linux/macOS: rlimits on address space and process count,
-applied in the child before exec.
+process when the job handle closes. Linux/macOS: an RLIMIT_DATA memory cap applied in the child
+before exec; process creation is blocked by the runtime audit hook in sandbox_runner.py.
 """
 
 from __future__ import annotations
@@ -18,10 +18,12 @@ def posix_preexec(memory_mb: int) -> Callable[[], None] | None:
     def apply() -> None:
         import resource
 
+        # RLIMIT_DATA caps real heap/anonymous allocations. RLIMIT_AS would also count the large
+        # *virtual* reservations numpy/scipy make at import, breaking ordinary code.
+        # (Process creation is blocked by the runtime audit hook; RLIMIT_NPROC is not used
+        # because it also counts threads and every process of the user.)
         limit = memory_mb * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-        if hasattr(resource, "RLIMIT_NPROC"):  # best effort: counts all processes of the user
-            resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+        resource.setrlimit(resource.RLIMIT_DATA, (limit, limit))
 
     return apply
 
