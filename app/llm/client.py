@@ -15,6 +15,7 @@ back for correction, after which the stage falls back to rule_based (see graph/n
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
@@ -30,8 +31,21 @@ class LLMError(RuntimeError):
     pass
 
 
-class LLMAuthError(LLMError):
+class LLMUnavailableError(LLMError):
+    """The provider cannot serve this session any more; callers should stop calling it."""
+
+
+class LLMAuthError(LLMUnavailableError):
     """The key was rejected (401/403): retrying is pointless until the configuration changes."""
+
+
+class LLMQuotaError(LLMUnavailableError):
+    """Rate limit with a long wait (e.g. a free-tier daily token quota is used up)."""
+
+
+# Free tiers answer bursts with HTTP 429 + retry-after. Short waits are worth it; long ones are not.
+MAX_RATE_LIMIT_WAIT_SECONDS = 20
+MAX_RATE_LIMIT_RETRIES = 2
 
 
 class Usage(BaseModel):
@@ -74,6 +88,15 @@ ANTHROPIC_DEFAULT_MODEL = "claude-opus-5"
 OLLAMA_DEFAULT_MODEL = "qwen2.5:3b"
 # Which key wins when several are set and LLM_PROVIDER=auto.
 AUTO_ORDER = ["anthropic", "openai", "gemini", "groq", "mistral", "deepseek", "openrouter", "together", "xai", "custom"]
+
+
+def _retry_after_seconds(r: httpx.Response) -> float:
+    """Seconds to wait from a 429 response (retry-after header), defaulting to a short pause."""
+    value = r.headers.get("retry-after", "")
+    try:
+        return max(float(value), 0.5)
+    except ValueError:
+        return 2.0
 
 
 def _strip_fences(text: str) -> str:
@@ -135,12 +158,25 @@ class OpenAICompatibleClient(_JSONRetryClient):
     def _call(self, messages, schema):
         if self._schema_mode:
             fmt = {"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()}}
-            r = httpx.post(self._url, json=self._body(messages, fmt), headers=self._headers, timeout=self.timeout)
+            r = self._post(self._body(messages, fmt))
             if r.status_code != 400:
                 return self._parse(r)
             self._schema_mode = False  # this server rejects json_schema; the schema is already in the prompt
-        r = httpx.post(self._url, json=self._body(messages, {"type": "json_object"}), headers=self._headers, timeout=self.timeout)
-        return self._parse(r)
+        return self._parse(self._post(self._body(messages, {"type": "json_object"})))
+
+    def _post(self, body: dict) -> httpx.Response:
+        """POST with rate-limit handling: wait out short 429s, give up quickly on long ones."""
+        for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+            r = httpx.post(self._url, json=body, headers=self._headers, timeout=self.timeout)
+            if r.status_code != 429:
+                return r
+            wait = _retry_after_seconds(r)
+            if wait > MAX_RATE_LIMIT_WAIT_SECONDS:
+                raise LLMQuotaError(f"{self.provider} rate limit/quota reached; retry after {wait:.0f}s. "
+                                    "Continuing with the rule-based reasoner for this session.")
+            if attempt < MAX_RATE_LIMIT_RETRIES:
+                time.sleep(wait)
+        raise LLMError(f"{self.provider} is still rate limiting after {MAX_RATE_LIMIT_RETRIES} retries")
 
     def _body(self, messages, fmt) -> dict:
         return {"model": self.model, "messages": messages, "temperature": 0, "response_format": fmt}

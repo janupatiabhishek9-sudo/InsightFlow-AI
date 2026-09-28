@@ -104,6 +104,13 @@ How it works:
 - **The other providers** use their OpenAI-compatible endpoints with JSON-schema output. If a server doesn't support that, the client falls back to JSON mode automatically.
 - **Every reply is validated against a Pydantic schema.** One invalid reply is sent back to the model for correction. If it's still invalid, that stage falls back to the rule-based reasoner, and the trace records which one ran.
 - **A rejected key (HTTP 401/403)** switches the LLM off for the rest of the session, with one clear log message, instead of failing at every stage.
+- **Free tiers work out of the box.** Short rate-limit waits (HTTP 429 with a `retry-after` of 20 s or less) are waited out and retried. A long wait, such as a used-up daily quota, switches the session to the rule-based reasoner, so the app keeps answering.
+
+**Staying on a free tier (e.g. Groq):**
+- One investigation uses roughly 8–12k tokens across 3–4 LLM calls. Free tiers cap tokens per minute and per day, and the limits vary by model; see your provider's limits page (for Groq: console.groq.com/settings/limits).
+- Set `TOKEN_BUDGET=25000` in `.env` to cap how many tokens one investigation may use.
+- If you hit the daily cap often, use a smaller model with higher free limits (for example `LLM_MODEL=llama-3.1-8b-instant` on Groq). It is faster, with somewhat weaker planning; the guards and fallbacks keep the results safe either way.
+- Nothing else in the project costs money. Everything runs locally, LangSmith is off by default, and CI runs on GitHub's free tier for public repositories.
 - **The LLM never has authority.** Whatever it proposes still passes grounding, plan validation, the tool gateway, the SQL/code guards and the output guard.
 
 ---
