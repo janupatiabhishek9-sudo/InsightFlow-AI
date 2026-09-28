@@ -1,0 +1,18 @@
+{
+  "answer_accuracy": 1.0,
+  "efficiency": 1.0,
+  "evidence_accuracy": 1.0,
+  "hitl_behavior": 1.0,
+  "numerical_accuracy": 1.0,
+  "planning": 1.0,
+  "question_understanding": 1.0,
+  "rag_retrieval": 1.0,
+  "report_quality": 1.0,
+  "safety": 1.0,
+  "sql_accuracy": 1.0,
+  "status_match": 1.0,
+  "tool_selection": 1.0,
+  "unsupported_claim_rate": 0.0,
+  "case_pass_rate": 1.0,
+  "mean_latency_s": 0.361
+}
