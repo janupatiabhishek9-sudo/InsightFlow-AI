@@ -32,6 +32,9 @@ from app.tools.periods import parse_periods, previous_period, same_period_last_y
 from app.tools.registry import TOOLS
 
 
+MAX_VALUES_PER_EVIDENCE = 40
+
+
 def schema_context(catalog: DataCatalog, quality: DataQualityReport) -> str:
     cols = [f"- {c.name} ({c.dtype}, {c.kind}){': ' + c.description if c.description else ''}" for c in catalog.schema_.columns]
     values = {k: v[:40] for k, v in catalog.values.items()}
@@ -140,7 +143,7 @@ def review_results_with_llm(llm: LLMClient, u: QuestionUnderstanding, plan: Inve
         output_schema=LLMResultReview.model_json_schema(),
         state=f"Question: {u.model_dump_json(include={'intent', 'metric', 'filters'})}\n"
               f"Plan: {[s.purpose for s in plan.steps]}\nDeterministic checks that failed: {failed_checks}",
-        task_input="Results (first rows per step):\n" + json.dumps(results, default=str)[:12000],
+        task_input="Results (first rows per step):\n" + json.dumps(results, default=str)[:6000],
     )
     return llm.structured(messages, LLMResultReview)
 
@@ -154,8 +157,11 @@ class LLMReport(BaseModel):
 
 def report_with_llm(llm: LLMClient, u: QuestionUnderstanding, objective: str, evidence: list[Evidence],
                     limitations: list[str]) -> tuple[ReportDraft, Usage]:
-    ev = [{"id": e.id, "type": e.evidence_type, "description": e.description, "values": e.values,
-           "excerpt": str(e.result)[:600] if e.evidence_type == "rag" else None} for e in evidence]
+    # Keep prompts small (free-tier token limits): breakdown rows are sorted, so the first values
+    # hold the main contributors. Claims citing a dropped number are caught by the output guard.
+    ev = [{"id": e.id, "type": e.evidence_type, "description": e.description,
+           "values": dict(list(e.values.items())[:MAX_VALUES_PER_EVIDENCE]),
+           "excerpt": str(e.result)[:400] if e.evidence_type == "rag" else None} for e in evidence]
     messages = REPORT_GENERATOR_V1.render(
         output_schema=LLMReport.model_json_schema(),
         rag_context=wrap_untrusted("retrieved_documents", json.dumps([x for x in ev if x["type"] == "rag"])),

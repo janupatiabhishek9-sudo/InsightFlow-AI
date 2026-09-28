@@ -7,7 +7,7 @@ from typing import Callable, TypeVar
 
 from app.graph.deps import Dependencies
 from app.graph.state import InvestigationState
-from app.llm.client import LLMAuthError, LLMClient, LLMError, Usage
+from app.llm.client import LLMClient, LLMError, LLMUnavailableError, Usage
 from app.tools.gateway import ToolGateway
 from app.tools.registry import ToolContext
 
@@ -50,9 +50,10 @@ def with_fallback(
             versions[stage] = contract_id
             return result, {"prompt_versions": versions, "token_usage": state.get("token_usage", 0) + usage.total}
         except (LLMError, ValueError) as e:
-            if isinstance(e, LLMAuthError):
-                # Circuit breaker: a rejected key will keep failing, so stop calling the provider this session.
-                log.error("LLM key rejected; using the rule-based reasoner until restart", extra={"error": str(e)})
+            if isinstance(e, LLMUnavailableError):
+                # Circuit breaker: a rejected key or an exhausted quota will keep failing,
+                # so stop calling the provider for the rest of this session.
+                log.error("LLM unavailable; using the rule-based reasoner until restart", extra={"error": str(e)})
                 deps.llm = None
             log.warning("llm stage failed, using deterministic fallback", extra={"stage": stage, "error": str(e)})
             versions[stage] = f"rule_based_v1 (fallback: {str(e)[:120]})"

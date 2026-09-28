@@ -110,6 +110,42 @@ def test_http_errors_become_llm_errors(monkeypatch):
         c.structured([{"role": "user", "content": "q"}], Out)
 
 
+def _limited(retry_after: str) -> httpx.Response:
+    return httpx.Response(429, headers={"retry-after": retry_after}, json={"error": "rate limit"},
+                          request=httpx.Request("POST", "http://x"))
+
+
+def test_short_rate_limits_are_waited_out(monkeypatch):
+    replies = iter([_limited("0.01"), _limited("0.01"), _reply('{"answer": "after wait"}')])
+    monkeypatch.setattr(llm.httpx, "post", lambda *a, **k: next(replies))
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    c = OpenAICompatibleClient("groq", "m", "k", "http://x", 5)
+    c._schema_mode = False
+    out, _ = c.structured([{"role": "user", "content": "q"}], Out)
+    assert out.answer == "after wait"
+
+
+def test_exhausted_quota_stops_calling_the_provider(settings, monkeypatch):
+    from app.llm.client import LLMQuotaError
+    from app.service import InsightFlowService
+
+    calls = []
+
+    def daily_limit(*a, **k):
+        calls.append(1)
+        return _limited("3600")  # e.g. the free-tier daily token quota is used up
+
+    monkeypatch.setattr(llm.httpx, "post", daily_limit)
+    c = OpenAICompatibleClient("groq", "m", "k", "http://x", 5)
+    with pytest.raises(LLMQuotaError):
+        c.structured([{"role": "user", "content": "q"}], Out)
+    svc = InsightFlowService(settings, llm=OpenAICompatibleClient("groq", "m", "k", "http://x", 5))
+    calls.clear()
+    v = svc.start_investigation(svc.example_dataset().dataset_id, "Why did European revenue decrease in Q3?")
+    assert v.status == "completed" and svc.deps.llm is None
+    assert len(calls) == 1  # one failed call, then the circuit breaker kept the session offline
+
+
 def test_rejected_key_trips_the_circuit_breaker(settings, monkeypatch):
     from app.service import InsightFlowService
 
