@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.api.schemas import DatasetInfo, InvestigationView  # noqa: E402
 from app.config import get_settings  # noqa: E402
+from app.llm.client import resolve_provider  # noqa: E402
 
 EXAMPLES = [
     "Why did European revenue decrease in Q3, and which products contributed most to the decline?",
@@ -44,19 +45,22 @@ class LocalBackend:
     def upload(self, name: str, data: bytes) -> DatasetInfo:
         return self.svc.register_dataset(name, data)
 
-    def start(self, dataset_id: str, question: str) -> InvestigationView:
-        return self.svc.start_investigation(dataset_id, question)
+    def start(self, dataset_id: str, question: str, on_progress=None) -> InvestigationView:
+        return self.svc.start_investigation(dataset_id, question, on_progress=on_progress)
 
-    def decide(self, inv_id: str, approved: bool, reviewer: str, comment: str) -> InvestigationView:
-        return self.svc.decide(inv_id, approved, reviewer, comment)
+    def decide(self, inv_id: str, approved: bool, reviewer: str, comment: str, on_progress=None) -> InvestigationView:
+        return self.svc.decide(inv_id, approved, reviewer, comment, on_progress=on_progress)
 
     def trace(self, inv_id: str) -> dict:
         return self.svc.trace(inv_id)
 
 
 class HttpBackend:
-    def __init__(self, url: str):
-        self.http = httpx.Client(base_url=url, timeout=180)
+    """Talks to the FastAPI server. Progress is shown after completion (the API call is synchronous)."""
+
+    def __init__(self, url: str, api_key: str | None):
+        headers = {"X-API-Key": api_key} if api_key else {}
+        self.http = httpx.Client(base_url=url, timeout=180, headers=headers)
 
     def _ok(self, r: httpx.Response) -> dict:
         if r.status_code >= 400:
@@ -69,11 +73,11 @@ class HttpBackend:
     def upload(self, name: str, data: bytes) -> DatasetInfo:
         return DatasetInfo.model_validate(self._ok(self.http.post("/datasets", files={"file": (name, data)})))
 
-    def start(self, dataset_id: str, question: str) -> InvestigationView:
+    def start(self, dataset_id: str, question: str, on_progress=None) -> InvestigationView:
         return InvestigationView.model_validate(
             self._ok(self.http.post("/investigations", json={"dataset_id": dataset_id, "question": question})))
 
-    def decide(self, inv_id: str, approved: bool, reviewer: str, comment: str) -> InvestigationView:
+    def decide(self, inv_id: str, approved: bool, reviewer: str, comment: str, on_progress=None) -> InvestigationView:
         body = {"approved": approved, "reviewer": reviewer, "comment": comment}
         return InvestigationView.model_validate(self._ok(self.http.post(f"/investigations/{inv_id}/decision", json=body)))
 
@@ -84,7 +88,27 @@ class HttpBackend:
 @st.cache_resource(show_spinner="Starting InsightFlow AI...")
 def backend():
     s = get_settings()
-    return HttpBackend(s.api_url) if s.ui_backend == "http" else LocalBackend()
+    if s.ui_backend == "http":
+        return HttpBackend(s.api_url, s.api_key.get_secret_value() if s.api_key else None)
+    return LocalBackend()
+
+
+def run_with_progress(label: str, action):
+    """Run a backend call, listing each workflow node live as it completes."""
+    with st.status(label, expanded=True) as status:
+        def on_progress(event: dict) -> None:
+            icon = {"ok": "✅", "error": "❌", "skipped": "⏭️"}.get(event.get("status"), "•")
+            st.write(f"{icon} `{event['node']}` ({event.get('duration_ms', 0):.0f} ms)")
+
+        try:
+            view = action(on_progress)
+        except ValueError as e:
+            status.update(label=f"Failed: {e}", state="error")
+            st.error(str(e))
+            return None
+        state = "complete" if view.status in ("completed", "awaiting_approval", "needs_clarification") else "error"
+        status.update(label=f"{label} - {view.status.replace('_', ' ')}", state=state, expanded=False)
+        return view
 
 
 def show_profile(info: DatasetInfo) -> None:
@@ -113,12 +137,13 @@ def show_approval(view: InvestigationView, be) -> None:
     reviewer = st.text_input("Reviewer name", value="analyst")
     comment = st.text_input("Comment (optional)")
     c1, c2 = st.columns(2)
-    if c1.button("APPROVE", type="primary", use_container_width=True):
-        st.session_state.view = be.decide(view.investigation_id, True, reviewer, comment)
-        st.rerun()
-    if c2.button("REJECT", use_container_width=True):
-        st.session_state.view = be.decide(view.investigation_id, False, reviewer, comment)
-        st.rerun()
+    for column, label, approved in ((c1, "APPROVE", True), (c2, "REJECT", False)):
+        if column.button(label, type="primary" if approved else "secondary", use_container_width=True):
+            new = run_with_progress("Resuming investigation",
+                                    lambda cb: be.decide(view.investigation_id, approved, reviewer, comment, cb))
+            if new is not None:
+                st.session_state.view = new
+                st.rerun()
 
 
 def show_view(view: InvestigationView, be) -> None:
@@ -221,7 +246,7 @@ def main() -> None:
                 st.session_state.question = q
         s = get_settings()
         st.divider()
-        st.caption(f"LLM: {s.llm_provider} · backend: {s.ui_backend} · clearance: {s.default_user_clearance}")
+        st.caption(f"LLM: {resolve_provider(s)} · backend: {s.ui_backend} · clearance: {s.default_user_clearance}")
 
     info: DatasetInfo | None = st.session_state.get("dataset")
     if info is None:
@@ -232,11 +257,9 @@ def main() -> None:
     question = st.text_area("Ask a question", key="question", height=80,
                             placeholder="Why did European revenue decline in Q3?")
     if st.button("Start Investigation", type="primary", disabled=not (question or "").strip()):
-        with st.spinner("Investigating..."):
-            try:
-                st.session_state.view = be.start(info.dataset_id, question)
-            except ValueError as e:
-                st.error(str(e))
+        new = run_with_progress("Investigating", lambda cb: be.start(info.dataset_id, question, cb))
+        if new is not None:
+            st.session_state.view = new
     view: InvestigationView | None = st.session_state.get("view")
     if view is not None:
         show_view(view, be)

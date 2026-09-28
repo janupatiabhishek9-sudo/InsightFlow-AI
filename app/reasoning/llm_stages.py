@@ -17,7 +17,13 @@ from app.domain.evidence import Claim, Evidence
 from app.domain.plan import InvestigationPlan
 from app.domain.question import ComparisonType, Intent, QuestionUnderstanding
 from app.llm.client import LLMClient, Usage
-from app.prompts.contracts import PLANNER_V1, QUESTION_UNDERSTANDING_V1, REPORT_GENERATOR_V1, SQL_GENERATION_V1
+from app.prompts.contracts import (
+    PLANNER_V1,
+    QUESTION_UNDERSTANDING_V1,
+    REPORT_GENERATOR_V1,
+    RESULT_VALIDATOR_V1,
+    SQL_GENERATION_V1,
+)
 from app.reasoning.catalog import DataCatalog
 from app.reasoning.reporting import ReportDraft
 from app.reasoning.understanding import ground
@@ -116,6 +122,27 @@ def repair_sql_with_llm(llm: LLMClient, catalog: DataCatalog, quality: DataQuali
         usage.completion_tokens += u.completion_tokens
         return out.sql
     return repair
+
+
+class ReviewConcern(BaseModel):
+    step: int | None = None
+    concern: str = Field(max_length=500)
+
+
+class LLMResultReview(BaseModel):
+    concerns: list[ReviewConcern] = Field(default_factory=list, max_length=8)
+
+
+def review_results_with_llm(llm: LLMClient, u: QuestionUnderstanding, plan: InvestigationPlan,
+                            results: list[dict], failed_checks: list[str]) -> tuple[LLMResultReview, Usage]:
+    """Semantic review of results (small samples, misleading comparisons). Can only add warnings."""
+    messages = RESULT_VALIDATOR_V1.render(
+        output_schema=LLMResultReview.model_json_schema(),
+        state=f"Question: {u.model_dump_json(include={'intent', 'metric', 'filters'})}\n"
+              f"Plan: {[s.purpose for s in plan.steps]}\nDeterministic checks that failed: {failed_checks}",
+        task_input="Results (first rows per step):\n" + json.dumps(results, default=str)[:12000],
+    )
+    return llm.structured(messages, LLMResultReview)
 
 
 class LLMReport(BaseModel):

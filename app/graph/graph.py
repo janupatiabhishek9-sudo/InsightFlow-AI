@@ -11,10 +11,13 @@ Any terminal status (blocked, needs_clarification, invalid_plan, rejected, faile
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
 from typing import Callable
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from app.graph.deps import Dependencies
@@ -71,8 +74,12 @@ def _after_results(max_retries: int) -> Callable[[InvestigationState], str]:
     return route
 
 
-def _checkpointer() -> InMemorySaver:
-    """In-memory checkpoints with an explicit allow-list of the types that may be deserialized."""
+def _checkpointer(db_path: Path | None):
+    """Checkpoints with an explicit allow-list of the types that may be deserialized.
+
+    With a path, state is persisted in SQLite, so an investigation paused for human approval
+    survives a process restart. Without one, checkpoints live in memory.
+    """
     import app.domain.data as data
     import app.domain.evidence as evidence
     import app.domain.governance as governance
@@ -87,7 +94,12 @@ def _checkpointer() -> InMemorySaver:
         for name, obj in vars(m).items()
         if isinstance(obj, type) and obj.__module__ == m.__name__
     ]
-    return InMemorySaver(serde=JsonPlusSerializer(allowed_msgpack_modules=allowed))
+    serde = JsonPlusSerializer(allowed_msgpack_modules=allowed)
+    if db_path is None:
+        return InMemorySaver(serde=serde)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    # One connection shared by the app's threads; SqliteSaver serialises access with its own lock.
+    return SqliteSaver(sqlite3.connect(db_path, check_same_thread=False), serde=serde)
 
 
 def build_graph(deps: Dependencies, checkpointer=None):
@@ -107,4 +119,6 @@ def build_graph(deps: Dependencies, checkpointer=None):
     g.add_conditional_edges("validate_results", _after_results(deps.settings.max_retries),
                             ["revise_plan", "generate_report", "finalize"])
     g.add_edge("finalize", END)
-    return g.compile(checkpointer=checkpointer or _checkpointer())
+    db = deps.settings.checkpoint_db.strip()
+    db_path = None if db in ("", "memory") else deps.settings.resolve(Path(db))
+    return g.compile(checkpointer=checkpointer or _checkpointer(db_path))

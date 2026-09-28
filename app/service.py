@@ -9,6 +9,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
+from typing import Any, Callable
 
 from langgraph.types import Command
 
@@ -28,6 +29,7 @@ from app.tools.profiler import profile_dataset
 
 log = logging.getLogger(__name__)
 EXAMPLE_ID = "example-sales"
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 class ServiceError(ValueError):
@@ -48,7 +50,8 @@ class InsightFlowService:
                                   self.settings.resolve(self.settings.vector_db_path),
                                   get_embedder(self.settings.embedding_model))
         self.deps = Dependencies(settings=self.settings, knowledge=knowledge, engines=EngineCache(self.settings),
-                                 sandbox=Sandbox(self.settings.sandbox_dir, self.settings.sandbox_timeout), llm=llm)
+                                 sandbox=Sandbox(self.settings.sandbox_dir, self.settings.sandbox_timeout,
+                                                 self.settings.sandbox_memory_mb), llm=llm)
         self.graph = build_graph(self.deps)
         self.traces = TraceStore(self.settings.trace_dir)
         self.settings.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -108,25 +111,41 @@ class InsightFlowService:
     def _config(self, investigation_id: str) -> dict:
         return {"configurable": {"thread_id": investigation_id}, "recursion_limit": 60}
 
-    def start_investigation(self, dataset_id: str, question: str, clearance: AccessLevel | None = None) -> InvestigationView:
+    def start_investigation(
+        self,
+        dataset_id: str,
+        question: str,
+        clearance: AccessLevel | None = None,
+        max_clearance: AccessLevel | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> InvestigationView:
+        """Run an investigation. `max_clearance` comes from the authenticated caller (default: config);
+        `clearance` may only lower it. `on_progress` receives each node's trace event as it completes."""
         info = self.dataset(dataset_id)
-        configured = self.settings.default_user_clearance
-        if clearance is not None and ACCESS_RANK[clearance] > ACCESS_RANK[configured]:
-            raise ServiceError("requested clearance exceeds the configured clearance")
+        ceiling = max_clearance or self.settings.default_user_clearance
+        if clearance is not None and ACCESS_RANK[clearance] > ACCESS_RANK[ceiling]:
+            raise ServiceError("requested clearance exceeds what this caller may read")
         investigation_id = uuid.uuid4().hex[:16]
         state = {"investigation_id": investigation_id, "user_question": question, "dataset_path": info.path,
-                 "clearance": clearance or configured}
-        return self._run(investigation_id, state)
+                 "clearance": clearance or ceiling}
+        return self._run(investigation_id, state, on_progress)
 
-    def decide(self, investigation_id: str, approved: bool, reviewer: str = "anonymous", comment: str = "") -> InvestigationView:
+    def decide(self, investigation_id: str, approved: bool, reviewer: str = "anonymous", comment: str = "",
+               on_progress: ProgressCallback | None = None) -> InvestigationView:
         view = self.get(investigation_id)
         if view.status != "awaiting_approval":
             raise ServiceError(f"investigation is not awaiting approval (status: {view.status})")
         decision = HumanDecision(approved=approved, reviewer=reviewer, comment=comment)
-        return self._run(investigation_id, Command(resume=decision.model_dump(mode="json")))
+        return self._run(investigation_id, Command(resume=decision.model_dump(mode="json")), on_progress)
 
-    def _run(self, investigation_id: str, payload) -> InvestigationView:
-        self.graph.invoke(payload, self._config(investigation_id))
+    def _run(self, investigation_id: str, payload, on_progress: ProgressCallback | None = None) -> InvestigationView:
+        # Streaming node updates lets callers show live progress; the result is identical to invoke().
+        for chunk in self.graph.stream(payload, self._config(investigation_id), stream_mode="updates"):
+            if on_progress is None:
+                continue
+            for update in chunk.values():
+                for event in (update or {}).get("trace_events", []) if isinstance(update, dict) else []:
+                    on_progress(event)
         view = self.get(investigation_id)
         if view.status == "awaiting_approval":
             values = self.graph.get_state(self._config(investigation_id)).values

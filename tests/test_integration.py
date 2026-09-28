@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.domain.question import Intent
 from app.llm.client import LLMError, Usage
 from app.main import create_app
-from app.reasoning.llm_stages import LLMReport, LLMUnderstanding
+from app.reasoning.llm_stages import LLMReport, LLMResultReview, LLMUnderstanding
 from app.service import InsightFlowService, ServiceError
 
 pytestmark = pytest.mark.integration
@@ -119,6 +119,8 @@ class FakeLLM:
             return LLMUnderstanding(intent=Intent.CHANGE_ANALYSIS, direction="decrease", metric="revenue",
                                     dimensions=["country"], filters={"region": ["Europe"]},
                                     period_mentions=["Q3 2024"], comparison_type="previous_period"), Usage(prompt_tokens=10)
+        if schema is LLMResultReview:
+            return LLMResultReview(concerns=[{"step": 2, "concern": "Q3 has fewer selling days than Q2"}]), Usage()
         if schema is LLMReport:
             ev = "E" + next(line for line in messages[1]["content"].split('"id": "E')[1:2])[0]
             claims = [{"text": "Revenue fell by 99.9%.", "kind": "fact", "section": "executive", "evidence_ids": [ev]}] \
@@ -139,6 +141,10 @@ def test_llm_path_with_fallback_is_recorded(settings):
     assert v.prompt_versions["question_understanding"] == "question_understanding_v1"
     assert v.prompt_versions["planner"].startswith("rule_based_v1 (fallback")
     assert v.model == {"provider": "fake", "model": "scripted-1"} and v.token_usage > 0
+    # The LLM result review may only add warnings; deterministic validation still passes.
+    assert v.prompt_versions["result_validator"] == "result_validator_v1"
+    review = [c for c in v.validation.checks if c.name == "llm_review"]
+    assert review and review[0].severity == "warning" and v.validation.passed
 
 
 def test_fabricated_llm_numbers_are_caught_by_the_output_guard(settings):

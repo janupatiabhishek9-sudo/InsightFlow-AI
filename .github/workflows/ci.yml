@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  LLM_PROVIDER: rule_based  # CI never calls a paid model; the evaluation gate runs deterministically
+
+jobs:
+  test:
+    name: tests + evaluation gate (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: "3.11"}
+          - {os: ubuntu-latest, python: "3.12"}
+          - {os: windows-latest, python: "3.12"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      # The annotate plugin turns each failing test into a public annotation on the run page.
+      - run: pip install -e ".[dev]" pytest-github-actions-annotate-failures
+      - run: python -m app.datagen
+      - run: pytest -rf --tb=short
+      - name: Golden-set evaluation (fails on regression)
+        run: python -m app.evaluation.runner --baseline evaluations/baseline.json
