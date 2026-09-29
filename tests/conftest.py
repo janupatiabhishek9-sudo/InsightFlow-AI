@@ -32,6 +32,7 @@ def settings(data_dir, tmp_path_factory) -> Settings:
         _env_file=None, llm_provider="rule_based", data_dir=data_dir, knowledge_dir=PROJECT_ROOT / "knowledge",
         vector_db_path=tmp_path_factory.mktemp("vectors"), default_user_clearance="internal", log_level="WARNING",
         checkpoint_db=str(tmp_path_factory.mktemp("checkpoints") / "cp.sqlite"),
+        admin_state_path=str(tmp_path_factory.mktemp("admin") / "admin.json"),
     )
 
 

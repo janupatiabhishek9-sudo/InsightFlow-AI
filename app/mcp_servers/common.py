@@ -46,7 +46,7 @@ def _signature_fn(spec: ToolSpec, gateway: ToolGateway):
 
 def build_server(group: str, dataset: Path, clearance: str | None = None) -> MCPServer:
     settings = get_settings()
-    engine = DuckDBEngine(dataset, settings.query_timeout, settings.max_result_rows)
+    engine = DuckDBEngine(dataset, settings.query_timeout, settings.max_result_rows, settings.duckdb_memory_mb)
     knowledge = KnowledgeBase(settings.resolve(settings.knowledge_dir), settings.resolve(settings.vector_db_path),
                               get_embedder(settings.embedding_model))
     ctx = ToolContext(engine=engine, knowledge=knowledge, sandbox=Sandbox(settings.sandbox_dir, settings.sandbox_timeout, settings.sandbox_memory_mb),

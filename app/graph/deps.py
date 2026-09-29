@@ -31,7 +31,8 @@ class EngineCache:
         with self._lock:
             engine = self._engines.get(investigation_id)
             if engine is None:
-                engine = DuckDBEngine(Path(dataset_path), self.settings.query_timeout, self.settings.max_result_rows)
+                engine = DuckDBEngine(Path(dataset_path), self.settings.query_timeout, self.settings.max_result_rows,
+                                      self.settings.duckdb_memory_mb)
                 self._engines[investigation_id] = engine
                 while len(self._engines) > self.max_engines:
                     _, old = self._engines.popitem(last=False)

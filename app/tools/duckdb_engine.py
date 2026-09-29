@@ -61,12 +61,12 @@ def _jsonable(value: Any) -> Any:
 
 
 class DuckDBEngine:
-    def __init__(self, dataset_path: Path, query_timeout: float = 15, max_rows: int = 500):
+    def __init__(self, dataset_path: Path, query_timeout: float = 15, max_rows: int = 500, memory_mb: int = 512):
         self.dataset_path = Path(dataset_path)
         self.query_timeout = query_timeout
         self.max_rows = max_rows
         self._lock = threading.Lock()
-        self.con = duckdb.connect(":memory:", config={"threads": 2, "memory_limit": "1GB"})
+        self.con = duckdb.connect(":memory:", config={"threads": 2, "memory_limit": f"{memory_mb}MB"})
         self._load()
         self.con.execute("SET enable_external_access = false")
         self.con.execute("SET lock_configuration = true")

@@ -19,23 +19,25 @@ Every number in the final report comes from an executed query and cites its evid
 ## Contents
 
 1. [Quick start](#quick-start)
-2. [Connect any LLM](#connect-any-llm)
-3. [What a run looks like](#what-a-run-looks-like)
-4. [Architecture](#architecture)
-5. [Why each technology](#why-each-technology)
-6. [Security architecture](#security-architecture)
-7. [Human-in-the-loop](#human-in-the-loop)
-8. [Authentication, persistence and deployment](#authentication-persistence-and-deployment)
-9. [Evidence and reports](#evidence-and-reports)
-10. [Evaluation](#evaluation)
-11. [Observability](#observability)
-12. [Configuration](#configuration)
-13. [Running tests and evaluations](#running-tests-and-evaluations)
-14. [MCP servers](#mcp-servers)
-15. [Running on an 8 GB laptop](#running-on-an-8-gb-laptop)
-16. [Repository layout](#repository-layout)
-17. [Known limitations](#known-limitations)
-18. [Future production work](#future-production-work)
+2. [Access codes and the admin page](#access-codes-and-the-admin-page)
+3. [Deploy for free (Streamlit Community Cloud)](#deploy-for-free-streamlit-community-cloud)
+4. [Connect any LLM](#connect-any-llm)
+5. [What a run looks like](#what-a-run-looks-like)
+6. [Architecture](#architecture)
+7. [Why each technology](#why-each-technology)
+8. [Security architecture](#security-architecture)
+9. [Human-in-the-loop](#human-in-the-loop)
+10. [Authentication, persistence and deployment](#authentication-persistence-and-deployment)
+11. [Evidence and reports](#evidence-and-reports)
+12. [Evaluation](#evaluation)
+13. [Observability](#observability)
+14. [Configuration](#configuration)
+15. [Running tests and evaluations](#running-tests-and-evaluations)
+16. [MCP servers](#mcp-servers)
+17. [Running on an 8 GB laptop](#running-on-an-8-gb-laptop)
+18. [Repository layout](#repository-layout)
+19. [Known limitations](#known-limitations)
+20. [Future production work](#future-production-work)
 
 ---
 
@@ -61,13 +63,71 @@ python -m app.run              # web app at http://localhost:8501 (opens your br
 python -m app.run --api        # also the REST API at http://localhost:8000/docs
 ```
 
-In the browser, click **Use example sales dataset**, pick an example question, and click **Start Investigation**. Press Ctrl+C in the terminal to stop.
+In the browser, enter an access code (`PYTHON2026` from `.env.example`), click **Use example sales dataset**, pick an example question, and click **Start investigation**. Press Ctrl+C in the terminal to stop.
 
 With `--api`, the web app talks to the API instead of loading its own copy of the service, so RAM use stays about the same. You can still start the parts by hand: `streamlit run frontend/streamlit_app.py` and `uvicorn app.main:app --port 8000`.
 
 **Use a real LLM** (optional): copy `.env.example` to `.env` and paste **one** API key. See [Connect any LLM](#connect-any-llm).
 
 No Docker, database server or GPU is needed. Everything runs as plain Python on an 8 GB laptop.
+
+---
+
+## Access codes and the admin page
+
+The web app has two pages: **Investigate** (for visitors) and **Admin** (password-protected).
+
+**Visitors** see a landing page and must enter a valid **access code** (coupon) before they can use anything. A session stays unlocked until the code is deactivated, it expires, or the project is switched off.
+
+**The admin page** (sidebar → *Admin*, sign in with `ADMIN_PASSWORD`) has four tabs:
+
+| Tab | What you can do |
+|---|---|
+| Overview | **ON/OFF switch** for the whole project, plus usage numbers (active codes, unlocks, investigations) |
+| Coupons | Create codes with an optional usage limit and expiry date; activate, deactivate or delete codes; see uses per code |
+| AI engine | **Switch AI on/off** (off = offline rule-based reasoner, no tokens used), replace the Groq API key, test the connection |
+| Activity | Admin audit log (logins, switches, code changes) and recent investigations |
+
+Where settings live:
+- **Defaults** come from `.env` locally, or from the app's **Secrets** on Streamlit Cloud: `ADMIN_PASSWORD`, `COUPONS`, `REQUIRE_COUPON`, `PROJECT_ENABLED` and the Groq key. These always survive restarts.
+- **Changes made in the admin page** are saved to `data/processed/admin_state.json`. Free hosts wipe their disk when an app restarts or redeploys. After that, the defaults apply again, and codes created in the admin page are gone. Put codes you want to keep permanently in `COUPONS`.
+- A Groq key entered in the admin page is stored only on the server's disk, never shown in full, and never committed to Git.
+
+`COUPONS` format: `CODE[:max_uses[:YYYY-MM-DD]]`, comma-separated. For example, `PYTHON2026:100:2026-12-31,DEMO` gives `PYTHON2026` 100 unlocks until the end of 2026, and `DEMO` unlimited unlocks with no expiry. Codes are not case-sensitive.
+
+The REST API also respects the ON/OFF switch: `POST /investigations` returns HTTP 503 while the project is off.
+
+---
+
+## Deploy for free (Streamlit Community Cloud)
+
+Streamlit Community Cloud hosts the web app for free, straight from this public GitHub repository. No Docker or credit card is needed.
+
+1. **Sign in** at https://share.streamlit.io with your GitHub account.
+2. Click **Create app** → **Deploy a public app from GitHub**, then fill in:
+   - **Repository:** `janupatiabhishek9-sudo/InsightFlow-AI`
+   - **Branch:** `main`
+   - **Main file path:** `frontend/streamlit_app.py`
+   - **App URL:** choose one, e.g. `insightflow-ai`
+3. Open **Advanced settings**, choose **Python 3.12**, and paste your secrets. Use `.streamlit/secrets.toml.example` as the template:
+   ```toml
+   LLM_PROVIDER = "groq"
+   LLM_MODEL = "openai/gpt-oss-120b"
+   GROQ_API_KEY = "gsk_..."
+   TOKEN_BUDGET = "25000"
+   ADMIN_PASSWORD = "a-long-random-password"
+   COUPONS = "PYTHON2026:100:2026-12-31"
+   REQUIRE_COUPON = "true"
+   ```
+4. Click **Deploy**. The first build installs `requirements.txt` and takes a few minutes.
+5. Open the app URL, go to **Admin**, sign in, and check the AI engine tab (**Test connection**).
+
+Good to know:
+- Streamlit passes these secrets to the app as environment variables, which is how the app reads them. You can change them later under *App → Settings → Secrets*; the app restarts automatically.
+- Every push to `main` redeploys the app automatically.
+- Free apps go to sleep after a few days without visitors. The next visitor wakes the app up, which takes about a minute.
+- Free apps get about 1 GB of RAM. The app uses roughly 300–500 MB (`DUCKDB_MEMORY_MB=512` caps the analytics engine).
+- Anyone with a valid code uses **your** Groq free quota. Use usage limits and expiry dates on codes, and the AI switch, to control this.
 
 ---
 
@@ -306,7 +366,7 @@ API_KEYS=alice:<32+ random chars>:approver:restricted,bob:<32+ random chars>:ana
 
 **Persistence.** Workflow checkpoints go to `CHECKPOINT_DB` (a SQLite file by default). Traces go to `data/traces/`. Uploaded datasets go to `data/raw/`.
 
-**Deployment.** The app is deliberately plain Python: `python -m app.run --api` on any machine with Python 3.11+. There is no Docker, on purpose, to keep it simple and light on 8 GB laptops. If auth is on, set `API_KEY` in `.env` so the web app can call the API.
+**Deployment.** The web app deploys for free to Streamlit Community Cloud; see [Deploy for free](#deploy-for-free-streamlit-community-cloud). On your own machine or server, `python -m app.run --api` runs everything with Python 3.11+. There is no Docker, on purpose, to keep it simple and light on 8 GB laptops. If API auth is on, set `API_KEY` in `.env` so the web app can call the API.
 
 **CI.** `.github/workflows/ci.yml` runs on GitHub's servers (nothing runs on your laptop) on every push and pull request:
 - the test suite on Ubuntu (Python 3.11 and 3.12) and Windows (Python 3.12);
@@ -439,6 +499,7 @@ Inside the app, the agent calls the gateway in-process rather than over stdio. T
 ```text
 app/
   run.py                                              one-command launcher (python -m app.run)
+  access.py                                           project ON/OFF switch, access codes, AI switch, audit log
   config.py, logging_config.py, datagen.py, service.py, main.py
   api/            routes.py, schemas.py, auth.py      REST API (FastAPI) with API-key roles
   domain/         question, plan, data, evidence, governance, report   typed Pydantic models
@@ -452,7 +513,9 @@ app/
   mcp_servers/    analytics_server, python_server, knowledge_server
   evaluation/     datasets, oracle, evaluators, runner
   observability/  tracing.py
-frontend/streamlit_app.py
+frontend/         streamlit_app.py (entry), ui_core.py, views/investigate.py, views/admin.py
+.streamlit/       config.toml (theme), secrets.toml.example (deployment secrets template)
+requirements.txt                                        dependencies for Streamlit Community Cloud
 knowledge/        business/, data/, policies/           markdown with access-level metadata
 evaluations/      datasets/golden_questions.json, baseline.json
 data/             examples/sales.csv, raw/ (uploads), traces/, processed/ (vector store, checkpoints)

@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     max_result_rows: int = Field(500, ge=1)
     sandbox_timeout: float = Field(20, gt=0)
     sandbox_memory_mb: int = Field(1024, ge=128)
+    duckdb_memory_mb: int = Field(512, ge=64, description="Per investigation; free cloud apps get ~1 GB RAM")
+
+    # Access control for the hosted app (see app/access.py)
+    admin_password: SecretStr | None = Field(None, description="Enables the Admin page")
+    coupons: str = Field("", description="Starting coupon codes: CODE[:max_uses[:YYYY-MM-DD]],...")
+    require_coupon: bool = Field(True, description="Visitors must enter a valid coupon to use the app")
+    project_enabled: bool = Field(True, description="Initial state of the project ON/OFF switch")
+    admin_state_path: str = "data/processed/admin_state.json"
 
     # UI / API
     ui_backend: Literal["local", "http"] = "local"

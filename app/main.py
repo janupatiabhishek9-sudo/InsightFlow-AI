@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app import __version__
+from app.access import AccessStore
 from app.api.routes import router
 from app.service import InsightFlowService
 
@@ -15,6 +16,7 @@ def create_app(service: InsightFlowService | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.service = service or InsightFlowService()
+        app.state.access = AccessStore(app.state.service.settings)  # honours the admin's ON/OFF switch
         yield
 
     app = FastAPI(title="InsightFlow AI", version=__version__, lifespan=lifespan,

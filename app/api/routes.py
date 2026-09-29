@@ -56,8 +56,10 @@ def get_dataset(dataset_id: str, svc: InsightFlowService = Depends(service),
 
 
 @router.post("/investigations", response_model=InvestigationView)
-def start_investigation(req: InvestigationRequest, svc: InsightFlowService = Depends(service),
+def start_investigation(req: InvestigationRequest, request: Request, svc: InsightFlowService = Depends(service),
                         principal: Principal = Depends(require("analyst"))) -> InvestigationView:
+    if not request.app.state.access.project_enabled:
+        raise HTTPException(status_code=503, detail="InsightFlow AI is switched off by the administrator")
     try:
         return svc.start_investigation(req.dataset_id, req.question, req.clearance, max_clearance=principal.clearance)
     except ServiceError as e:

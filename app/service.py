@@ -18,7 +18,7 @@ from app.config import AccessLevel, Settings, get_settings
 from app.domain.governance import HumanDecision
 from app.graph.deps import Dependencies, EngineCache
 from app.graph.graph import build_graph
-from app.llm.client import LLMError, build_llm
+from app.llm.client import OPENAI_COMPATIBLE, LLMError, OpenAICompatibleClient, build_llm, describe, resolve_provider
 from app.logging_config import configure_logging
 from app.observability.tracing import TraceStore, configure_langsmith
 from app.rag.embeddings import get_embedder
@@ -56,6 +56,25 @@ class InsightFlowService:
         self.traces = TraceStore(self.settings.trace_dir)
         self.settings.raw_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---- AI switch ----------------------------------------------------------------------------
+    def apply_ai_settings(self, enabled: bool, groq_key: str | None = None) -> str:
+        """Switch AI mode at runtime (admin page). Returns a description of the model now in use."""
+        if not enabled:
+            self.deps.llm = None
+        elif groq_key:
+            groq = OPENAI_COMPATIBLE["groq"]
+            model = self.settings.llm_model.strip() if resolve_provider(self.settings) == "groq" else ""
+            self.deps.llm = OpenAICompatibleClient("groq", model or groq.default_model, groq_key, groq.base_url,
+                                                   self.settings.llm_timeout_seconds)
+        else:
+            try:
+                self.deps.llm = build_llm(self.settings)
+            except LLMError as e:
+                log.error("LLM misconfigured; using rule_based", extra={"error": str(e)})
+                self.deps.llm = None
+        provider, model = describe(self.deps.llm)
+        return f"{provider}/{model}"
+
     # ---- datasets ---------------------------------------------------------------------------
     def _meta_path(self, dataset_id: str) -> Path:
         if not re.fullmatch(r"[a-z0-9-]{1,64}", dataset_id):
@@ -90,7 +109,7 @@ class InsightFlowService:
         return self._describe(EXAMPLE_ID, "sales.csv", path)
 
     def _describe(self, dataset_id: str, filename: str, path: Path) -> DatasetInfo:
-        engine = DuckDBEngine(path, self.settings.query_timeout, self.settings.max_result_rows)
+        engine = DuckDBEngine(path, self.settings.query_timeout, self.settings.max_result_rows, self.settings.duckdb_memory_mb)
         try:
             _, quality = profile_dataset(engine)
         finally:
